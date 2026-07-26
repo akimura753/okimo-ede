@@ -1,0 +1,1552 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>OKIMO Edge NAVi v6 — モールス振動同期</title>
+<!-- v6: モールス信号に振動を同期（Android）。オンオフ切替つき。
+     v5: モールス信号モード追加。K(-.-)×2 = 中央±50cm・前方1mにエッジなし（進行可）。
+     SOS(...---...)×2 = 現在速度でボディスペースがエッジに接触すると予測。
+     信号→待機→再推定のサイクル。オンオフ切替・予測時間・ボディ幅設定つき。 -->
+<style>
+  :root{
+    --bg:#0b0b0d; --panel:#17171b; --panel2:#1f1f25;
+    --ink:#f2f2ef; --dim:#9a9aa2;
+    --edge:#ffd400; --near:#ff5a3c; --ok:#57d98a;
+    --line:#2c2c34;
+  }
+  *{box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:"Hiragino Sans","Yu Gothic UI","Noto Sans JP",system-ui,sans-serif;
+    min-height:100vh; padding-bottom:56px;
+  }
+  header{
+    display:flex; align-items:center; gap:8px;
+    padding:12px 14px 8px; border-bottom:2px solid var(--edge);
+  }
+  header h1{font-size:.95rem; letter-spacing:.04em; font-weight:800; flex:1;}
+  #langSel{
+    border:1px solid var(--line); background:var(--panel2); color:var(--ink);
+    border-radius:8px; padding:8px; font-size:.85rem; font-weight:700; width:auto;
+  }
+  #micBtn{
+    border:1px solid var(--line); background:var(--panel2); color:var(--ink);
+    border-radius:20px; padding:8px 12px; font-size:.85rem; font-weight:700;
+  }
+  #micBtn.on{background:var(--near); border-color:var(--near); color:#fff;}
+  nav{display:flex; border-bottom:1px solid var(--line);}
+  nav button{
+    flex:1; padding:12px 4px; background:none; border:none; color:var(--dim);
+    font-size:.9rem; font-weight:800; letter-spacing:.08em; border-bottom:3px solid transparent;
+  }
+  nav button.act{color:var(--edge); border-bottom-color:var(--edge);}
+  .tab{display:none;} .tab.act{display:block;}
+  #stage{position:relative; width:100%; background:#000; line-height:0;}
+  #view,#hud{width:100%; display:block;}
+  #hud{position:absolute; left:0; top:0; height:100%; pointer-events:none;}
+  #status{
+    position:absolute; left:10px; top:10px; pointer-events:none;
+    font-size:.72rem; font-weight:700; background:rgba(0,0,0,.55); color:var(--edge);
+    padding:4px 8px; border-left:3px solid var(--edge);
+  }
+  #modelBadge{
+    position:absolute; right:10px; top:10px; pointer-events:none;
+    font-size:.68rem; font-weight:700; background:rgba(0,0,0,.55); color:var(--ok);
+    padding:4px 8px; border-right:3px solid var(--ok); display:none;
+  }
+  #callout{position:absolute; left:0; right:0; bottom:10px; text-align:center; pointer-events:none;}
+  #callout span{
+    display:inline-block; background:rgba(0,0,0,.65); color:#fff;
+    font-size:1.02rem; font-weight:800; padding:6px 14px; border-radius:4px;
+    border:1px solid rgba(255,212,0,.5);
+  }
+  .row{display:flex; gap:10px; padding:12px 14px;}
+  button.big{
+    flex:1; padding:16px 8px; font-size:1.1rem; font-weight:800;
+    border:none; border-radius:10px; letter-spacing:.1em;
+    color:#111; background:var(--edge);
+  }
+  button.big[disabled]{opacity:.35;}
+  button.big.stop{background:#3a3a42; color:var(--ink);}
+  button.big.stop.armed{background:var(--near); color:#fff;}
+  .hint{padding:0 16px 10px; font-size:.72rem; color:var(--dim); line-height:1.6;}
+  section.panel{
+    margin:10px 12px; background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; overflow:hidden;
+  }
+  section.panel h2{
+    font-size:.72rem; letter-spacing:.14em; color:var(--dim);
+    padding:10px 14px 6px; font-weight:700;
+  }
+  .ctl{display:flex; align-items:center; gap:10px; padding:8px 14px;}
+  .ctl label{flex:0 0 9em; font-size:.8rem;}
+  .ctl input[type=range]{flex:1; accent-color:var(--edge);}
+  .ctl input[type=checkbox]{width:22px;height:22px;accent-color:var(--edge);}
+  .ctl output{flex:0 0 4.2em; text-align:right; font-size:.8rem; color:var(--edge); font-variant-numeric:tabular-nums;}
+  .switches{display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:10px 14px 0;}
+  .sw{
+    display:flex; align-items:center; justify-content:space-between; gap:6px;
+    background:var(--panel2); border:1px solid var(--line);
+    border-radius:8px; padding:10px 12px; font-size:.8rem;
+  }
+  .sw input{width:22px; height:22px; accent-color:var(--edge); flex:0 0 auto;}
+  .foot{display:flex; gap:10px; padding:10px 14px 14px; flex-wrap:wrap;}
+  .foot button, .btn{
+    flex:1; min-width:8em; padding:12px; border-radius:8px; border:1px solid var(--line);
+    background:var(--panel2); color:var(--ink); font-weight:700; font-size:.88rem;
+  }
+  .btn.warn,.foot button.warn{border-color:var(--near); color:var(--near);}
+  .gold{background:var(--edge) !important; color:#111 !important; border-color:var(--edge) !important;}
+  select,input[type=text]{
+    width:100%; padding:12px; font-size:1rem; border-radius:8px;
+    border:1px solid var(--line); background:var(--panel2); color:var(--ink);
+  }
+  #frames{display:flex; gap:8px; overflow-x:auto; padding:10px 14px;}
+  #frames .fr{flex:0 0 96px; border:2px solid var(--line); border-radius:6px; overflow:hidden; position:relative;}
+  #frames .fr.sel{border-color:var(--edge);}
+  #frames .fr.done::after{
+    content:"✓"; position:absolute; right:2px; top:0; color:var(--ok); font-weight:900; font-size:1.1rem;
+    text-shadow:0 0 4px #000;
+  }
+  #frames img{width:100%; display:block;}
+  #annoWrap{position:relative; margin:0 14px; line-height:0; touch-action:none;}
+  #annoImg,#annoDraw{width:100%; display:block; border-radius:8px;}
+  #annoDraw{position:absolute; left:0; top:0; height:100%;}
+  .toolrow{display:flex; gap:8px; padding:10px 14px;}
+  .toolrow button{
+    flex:1; padding:10px 2px; border-radius:8px; border:1px solid var(--line);
+    background:var(--panel2); color:var(--ink); font-weight:700; font-size:.8rem;
+  }
+  .toolrow button.act{background:var(--edge); color:#111; border-color:var(--edge);}
+  #log,#recList{
+    margin:0 12px 12px; padding:10px 14px; font-size:.72rem; color:var(--dim);
+    font-family:ui-monospace,Menlo,monospace; white-space:pre-wrap; line-height:1.7;
+  }
+  #recList{background:var(--panel); border:1px solid var(--line); border-radius:12px; max-height:40vh; overflow-y:auto;}
+  video{display:none;}
+  #voiceEcho{
+    position:fixed; left:0; right:0; bottom:0; padding:8px 14px;
+    background:#000; border-top:1px solid var(--line);
+    font-size:.76rem; color:var(--dim); z-index:9;
+  }
+  #voiceEcho b{color:var(--edge);}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>OKIMO Edge NAVi <span style="color:var(--edge)">v6</span></h1>
+  <select id="langSel"></select>
+  <button id="micBtn">🎙</button>
+</header>
+
+<nav>
+  <button data-tab="live" class="act" id="navLive">計 測</button>
+  <button data-tab="learn" id="navLearn">学 習</button>
+  <button data-tab="rec" id="navRec">記 録</button>
+</nav>
+
+<!-- ============ LIVE ============ -->
+<div class="tab act" id="tab-live">
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <canvas id="hud"></canvas>
+    <div id="status"></div>
+    <div id="modelBadge"></div>
+    <div id="callout"><span id="calloutText"></span></div>
+  </div>
+  <div class="row">
+    <button class="big" id="btnStart"></button>
+    <button class="big stop" id="btnStop" disabled></button>
+  </div>
+  <div class="hint" id="hintLive"></div>
+
+  <section class="panel">
+    <h2 id="hRouteModel"></h2>
+    <div class="ctl" style="padding-bottom:14px;"><select id="liveRoute"></select></div>
+  </section>
+
+  <section class="panel">
+    <h2 id="hScreen"></h2>
+    <div class="ctl"><label id="lblBin"></label><input type="checkbox" id="binOn" checked><output></output></div>
+    <div class="ctl"><label id="lblBinTh"></label><input type="range" id="binTh" min="30" max="220" value="110"><output id="binThV">110</output></div>
+    <div class="ctl"><label id="lblBright"></label><input type="range" id="bright" min="-80" max="80" value="0"><output id="brightV">0</output></div>
+    <div class="ctl"><label id="lblContrast"></label><input type="range" id="contrast" min="50" max="250" value="100"><output id="contrastV">100%</output></div>
+  </section>
+
+  <section class="panel">
+    <h2 id="hDist"></h2>
+    <div class="ctl"><label id="lblCamH"></label><input type="range" id="camH" min="80" max="180" value="130"><output id="camHV">130cm</output></div>
+    <div class="ctl"><label id="lblTilt"></label><input type="range" id="tilt" min="5" max="45" value="20"><output id="tiltV">20°</output></div>
+    <div class="ctl"><label id="lblEdgeTh"></label><input type="range" id="edgeTh" min="20" max="120" value="55"><output id="edgeThV">55</output></div>
+  </section>
+
+  <section class="panel">
+    <h2 id="hRec"></h2>
+    <div class="switches">
+      <label class="sw"><span id="swCsv"></span><input type="checkbox" id="csvOn" checked></label>
+      <label class="sw"><span id="swTts"></span><input type="checkbox" id="ttsOn" checked></label>
+      <label class="sw"><span id="swMorse"></span><input type="checkbox" id="morseOn"></label>
+      <label class="sw"><span id="swVib"></span><input type="checkbox" id="vibOn"></label>
+      <label class="sw"><span id="swPitch"></span><input type="checkbox" id="pitchOn"></label>
+    </div>
+    <div class="ctl"><label id="lblRate"></label><input type="range" id="ttsRate" min="60" max="200" value="115"><output id="ttsRateV">1.15×</output></div>
+    <div class="ctl"><label id="lblBodyW"></label><input type="range" id="bodyW" min="30" max="90" value="50"><output id="bodyWV">50cm</output></div>
+    <div class="ctl"><label id="lblHorizon"></label><input type="range" id="horizon" min="10" max="40" value="20"><output id="horizonV">2.0s</output></div>
+    <div class="ctl"><label id="lblStride"></label><input type="range" id="stride" min="40" max="90" value="65"><output id="strideV">65cm</output></div>
+    <div class="foot">
+      <button id="btnCsv"></button>
+      <button id="btnTest"></button>
+    </div>
+  </section>
+
+  <pre id="log"></pre>
+</div>
+
+<!-- ============ LEARN ============ -->
+<div class="tab" id="tab-learn">
+  <section class="panel">
+    <h2 id="hRoute"></h2>
+    <div class="ctl"><select id="routeSel"></select></div>
+    <div class="ctl"><input type="text" id="routeNew"></div>
+    <div class="foot"><button id="btnRouteAdd" class="gold"></button></div>
+  </section>
+
+  <section class="panel">
+    <h2 id="hCollect"></h2>
+    <div class="foot">
+      <button id="btnCap"></button>
+      <button id="btnVid"></button>
+      <input type="file" id="vidFile" accept="video/*" style="display:none">
+    </div>
+    <div class="hint" id="hintCollect"></div>
+    <div id="frames"></div>
+  </section>
+
+  <section class="panel">
+    <h2 id="hAnno"></h2>
+    <div id="annoWrap">
+      <canvas id="annoImg"></canvas>
+      <canvas id="annoDraw"></canvas>
+    </div>
+    <div class="toolrow">
+      <button id="mAuto" class="act"></button>
+      <button id="mV"></button>
+      <button id="mH"></button>
+      <button id="mUndo"></button>
+      <button id="mClear"></button>
+    </div>
+    <div class="foot"><button id="btnAnnoSave" class="gold"></button></div>
+    <div class="hint" id="hintAnno"></div>
+  </section>
+
+  <section class="panel">
+    <h2 id="hTrain"></h2>
+    <div class="foot"><button id="btnTrain" class="gold"></button></div>
+    <div class="hint" id="trainInfo"></div>
+  </section>
+</div>
+
+<!-- ============ RECORDS ============ -->
+<div class="tab" id="tab-rec">
+  <section class="panel">
+    <h2 id="hRecords"></h2>
+    <div id="recList"></div>
+    <div class="foot">
+      <button id="btnExport"></button>
+      <button id="btnImport"></button>
+      <input type="file" id="jsonFile" accept="application/json" style="display:none">
+      <button id="btnWipe" class="warn"></button>
+    </div>
+    <div class="hint" id="hintRecords"></div>
+  </section>
+</div>
+
+<div id="voiceEcho">🎙 <b id="voiceState"></b>　<span id="voiceHeard"></span></div>
+<video id="cam" playsinline muted></video>
+<video id="vplay" playsinline muted></video>
+
+<script>
+"use strict";
+/* ============================================================
+   OKIMO Edge NAVi v4 — 多言語（ja/en/fr/zh/ko/it/de）
+   ============================================================ */
+const PW=240, PH=180, VFOV=55*Math.PI/180;
+const $=id=>document.getElementById(id);
+const video=$("cam"), vplay=$("vplay"), view=$("view"), hud=$("hud");
+const vctx=view.getContext("2d"), hctx=hud.getContext("2d");
+const proc=document.createElement("canvas"); proc.width=PW; proc.height=PH;
+const pctx=proc.getContext("2d",{willReadFrequently:true});
+
+/* ================= 多言語辞書 ================= */
+const LANGS={
+ja:{name:"日本語",tts:"ja-JP",sr:"ja-JP",
+ cmd:{start:/開始|かいし|スタート/,stop:/終了|しゅうりょう|ストップ/,mark:/マーク|まーく|撮影|さつえい/},
+ sp:{align:"画面中央を身体の真ん中においてください",start:"計測を開始します",stop:"計測を終了します",
+  slow:"少しゆっくり歩いてください",clear:"前方クリア",annoSaved:"注釈を保存しました",
+  trained:v=>`学習が完了しました。バージョン${v}です`,rateDemo:"この速さで読み上げます",
+  capStart:"経路の撮影を始めます。マーク、と言うと今のコマを取得します",vidDone:"動画からコマを抽出しました",
+  dist:{1:"50センチ",2:"1メートル",3:"2メートル"},latC:"中央",side:{r:"みぎ",l:"ひだり"},
+  lat50:s=>s+"50センチ",lat1:s=>s+"1メートル",latOut:s=>s+"1メートルより外",
+  edgeH:"よこエッジ",edgeV:"たてエッジ",
+  phrase:(d,l,e)=>`まえ${d}、${l}、${e}あり`},
+ ui:{tabLive:"計 測",tabLearn:"学 習",tabRec:"記 録",
+  statusIdle:"待機中",statusRun:"計測中",statusAlign:"位置合わせ",statusNoCam:"カメラを使用できません",
+  calloutInit:"「開始」とタップ、または声で言ってください",calloutDone:"終了しました",
+  btnStart:"開 始",btnStop:"終 了",
+  hintLive:"タップでも音声でも操作できます。開始時に位置合わせの発声後、4秒で計測開始。読み上げ＝前方距離＋中央からの横位置。",
+  hRouteModel:"使用する経路モデル",optStandard:"（標準検出のみ）",
+  hScreen:"画面調整",lblBin:"白黒二値化",lblBinTh:"二値しきい値",lblBright:"明るさ",lblContrast:"コントラスト",
+  hDist:"距離換算（地面平面モデル）",lblCamH:"カメラ高さ",lblTilt:"下向き角度",lblEdgeTh:"エッジ感度",
+  hRec:"記録・音声",swCsv:"CSV記録（0.2秒毎）",swTts:"音声読み上げ",lblRate:"読み上げ速度",
+  btnCsv:"CSVを保存",btnTest:"読み上げテスト",
+  hRoute:"経路（同じ道を数回ぶん蓄積）",phRouteNew:"新しい経路名（例：自宅→駅 北口）",btnRouteAdd:"経路を追加",
+  hCollect:"① 画像を集める",btnCap:"カメラで経路を撮影",btnCapStop:"撮影停止（タップで即時コマ取得）",
+  btnVid:"動画ファイル読み込み",hintCollect:"撮影中は1.5秒ごとに自動コマ取得。「マーク」の発声や画面タップでも即時取得。動画は約1秒間隔で抽出。",
+  hAnno:"② エッジを手で描く",mAuto:"自動判別",mV:"たて",mH:"よこ",mUndo:"戻す",mClear:"全消去",
+  btnAnnoSave:"この画像の注釈を保存",hintAnno:"指でエッジをなぞると直線に補正されます。たて＝黄、よこ＝橙。",
+  hTrain:"③ 学習を実行",btnTrain:"この経路のモデルを学習",btnTraining:"学習中…",
+  trainSelRoute:"経路を選択してください",
+  trainFmt:(r,nV,nH,mv,dt)=>`経路「${r}」 教師データ：たて${nV}件／よこ${nH}件`+(mv?`　学習済み: v${mv}（${dt}）`:"　未学習"),
+  hRecords:"学習・計測の記録",recEmpty:"（記録なし）",btnExport:"JSON書き出し",btnImport:"JSON読み込み",btnWipe:"全データ削除",
+  hintRecords:"教師サンプル・学習済み重み・履歴をまとめて書き出せます。別端末に読み込んで学習を引き継げます。",
+  micOn:"音声ON",micOff:"音声OFF",vsIdle:"停止中",vsListen:"待ち受け中",vsNoSupport:"この端末は非対応",vsDenied:"マイク不許可",
+  modelApplied:(v,r)=>`学習モデル v${v}：${r}`,modelUntrained:"この経路は未学習（標準検出）",
+  aNeedRoute:"先に経路を選択・追加してください",aNeedFrameRoute:"フレームと経路を選択してください",
+  aNeedData:"教師データが不足しています。数コマぶん注釈を保存してください。",aNeedBoth:"たて・よこ両方の注釈が必要です",
+  aWipe:"学習データ・モデル・記録をすべて削除します。よろしいですか？",aImported:"読み込みました",aImportFail:"読み込み失敗: ",swMorse:"モールス信号",lblBodyW:"ボディ幅",lblHorizon:"予測時間",swVib:"モールス振動",vibNoSupport:"この端末は振動APIに対応していません（iPhoneのブラウザでは使えません）",swPitch:"歩行ピッチ速度",lblStride:"歩幅",diagInsecure:"HTTPSで開いてください（http・fileではブラウザ仕様によりカメラ不可）",diagIframe:"この埋め込みプレビューではカメラを使えません。HTMLファイルをダウンロードし、HTTPSのサイトに置くかブラウザで直接開いてください",diagDenied:"カメラの使用が拒否されました。ブラウザのサイト設定でカメラを「許可」にしてください",diagNoCam:"カメラが見つかりません",diagBusy:"カメラが他のアプリで使用中です。他のカメラアプリを閉じて再試行してください",aCamErr:"カメラを使用できません: "}},
+en:{name:"English",tts:"en-US",sr:"en-US",
+ cmd:{start:/\bstart\b|\bbegin\b/i,stop:/\bstop\b|\bfinish\b|\bend\b/i,mark:/\bmark\b|\bcapture\b/i},
+ sp:{align:"Place the center of the screen at the middle of your body",start:"Starting measurement",stop:"Measurement finished",
+  slow:"Please walk a little slower",clear:"Path clear",annoSaved:"Annotation saved",
+  trained:v=>`Training complete. Version ${v}`,rateDemo:"Reading at this speed",
+  capStart:"Route capture started. Say mark to grab the current frame",vidDone:"Frames extracted from video",
+  dist:{1:"50 centimeters",2:"1 meter",3:"2 meters"},latC:"center",side:{r:"right",l:"left"},
+  lat50:s=>`${s} 50 centimeters`,lat1:s=>`${s} 1 meter`,latOut:s=>`${s} beyond 1 meter`,
+  edgeH:"horizontal edge",edgeV:"vertical edge",
+  phrase:(d,l,e)=>`Ahead ${d}, ${l}, ${e}`},
+ ui:{tabLive:"MEASURE",tabLearn:"LEARN",tabRec:"RECORDS",
+  statusIdle:"Standby",statusRun:"Measuring",statusAlign:"Aligning",statusNoCam:"Camera unavailable",
+  calloutInit:"Tap or say \"start\"",calloutDone:"Finished",
+  btnStart:"START",btnStop:"STOP",
+  hintLive:"Operate by tap or voice. After the alignment prompt, measuring begins in 4 seconds. Speech = forward distance + lateral offset from center.",
+  hRouteModel:"Route model in use",optStandard:"(standard detection only)",
+  hScreen:"Display",lblBin:"B/W threshold view",lblBinTh:"Binarize threshold",lblBright:"Brightness",lblContrast:"Contrast",
+  hDist:"Distance (ground-plane model)",lblCamH:"Camera height",lblTilt:"Downward tilt",lblEdgeTh:"Edge sensitivity",
+  hRec:"Logging & speech",swCsv:"CSV log (every 0.2 s)",swTts:"Speech output",lblRate:"Speech rate",
+  btnCsv:"Save CSV",btnTest:"Speech test",
+  hRoute:"Route (accumulate several passes)",phRouteNew:"New route name (e.g. Home → Station North)",btnRouteAdd:"Add route",
+  hCollect:"① Collect images",btnCap:"Capture route with camera",btnCapStop:"Stop capture (tap = grab frame)",
+  btnVid:"Load video file",hintCollect:"Auto frame every 1.5 s while capturing. Say \"mark\" or tap to grab now. Video extracts ~1 frame/s.",
+  hAnno:"② Draw edges by hand",mAuto:"Auto",mV:"Vert",mH:"Horiz",mUndo:"Undo",mClear:"Clear",
+  btnAnnoSave:"Save annotation for this frame",hintAnno:"Trace an edge with your finger; it is straightened. Vertical = yellow, horizontal = orange.",
+  hTrain:"③ Run training",btnTrain:"Train model for this route",btnTraining:"Training…",
+  trainSelRoute:"Select a route",
+  trainFmt:(r,nV,nH,mv,dt)=>`Route "${r}"  samples: V ${nV} / H ${nH}`+(mv?`  trained: v${mv} (${dt})`:"  untrained"),
+  hRecords:"Training & measurement records",recEmpty:"(no records)",btnExport:"Export JSON",btnImport:"Import JSON",btnWipe:"Delete all data",
+  hintRecords:"Export samples, trained weights and history together; import on another device to continue learning.",
+  micOn:"Voice ON",micOff:"Voice OFF",vsIdle:"stopped",vsListen:"listening",vsNoSupport:"not supported",vsDenied:"mic denied",
+  modelApplied:(v,r)=>`Model v${v}: ${r}`,modelUntrained:"Route untrained (standard detection)",
+  aNeedRoute:"Select or add a route first",aNeedFrameRoute:"Select a frame and a route",
+  aNeedData:"Not enough training data. Save annotations for a few frames.",aNeedBoth:"Both vertical and horizontal annotations are required",
+  aWipe:"Delete ALL training data, models and records?",aImported:"Imported",aImportFail:"Import failed: ",swMorse:"Morse signals",lblBodyW:"Body width",lblHorizon:"Prediction time",swVib:"Morse vibration",vibNoSupport:"Vibration API not supported on this device (unavailable in iPhone browsers)",swPitch:"Step-cadence speed",lblStride:"Stride length",diagInsecure:"Open via HTTPS (camera is blocked on http/file by the browser)",diagIframe:"Camera is blocked in this embedded preview. Download the HTML file and host it on HTTPS or open it directly in your browser",diagDenied:"Camera permission denied. Set camera to Allow in browser site settings",diagNoCam:"No camera found",diagBusy:"Camera is in use by another app. Close it and retry",aCamErr:"Camera unavailable: "}},
+fr:{name:"Français",tts:"fr-FR",sr:"fr-FR",
+ cmd:{start:/démarr|commenc|\bstart\b/i,stop:/arrêt|\bstop\b|termin/i,mark:/marqu|\bmark\b|captur/i},
+ sp:{align:"Placez le centre de l'écran au milieu de votre corps",start:"Début de la mesure",stop:"Fin de la mesure",
+  slow:"Marchez un peu plus lentement, s'il vous plaît",clear:"Voie libre",annoSaved:"Annotation enregistrée",
+  trained:v=>`Apprentissage terminé. Version ${v}`,rateDemo:"Lecture à cette vitesse",
+  capStart:"Capture de l'itinéraire commencée. Dites « marque » pour saisir l'image",vidDone:"Images extraites de la vidéo",
+  dist:{1:"50 centimètres",2:"1 mètre",3:"2 mètres"},latC:"au centre",side:{r:"à droite",l:"à gauche"},
+  lat50:s=>`${s} 50 centimètres`,lat1:s=>`${s} 1 mètre`,latOut:s=>`${s} au-delà d'1 mètre`,
+  edgeH:"bord horizontal",edgeV:"bord vertical",
+  phrase:(d,l,e)=>`Devant ${d}, ${l}, ${e}`},
+ ui:{tabLive:"MESURE",tabLearn:"APPRENDRE",tabRec:"JOURNAL",
+  statusIdle:"En attente",statusRun:"Mesure",statusAlign:"Alignement",statusNoCam:"Caméra indisponible",
+  calloutInit:"Touchez ou dites « démarrer »",calloutDone:"Terminé",
+  btnStart:"DÉMARRER",btnStop:"ARRÊTER",
+  hintLive:"Commande tactile ou vocale. Après l'invite d'alignement, la mesure démarre en 4 s. Annonce = distance avant + décalage latéral.",
+  hRouteModel:"Modèle d'itinéraire utilisé",optStandard:"(détection standard seule)",
+  hScreen:"Affichage",lblBin:"Vue noir et blanc",lblBinTh:"Seuil de binarisation",lblBright:"Luminosité",lblContrast:"Contraste",
+  hDist:"Distance (modèle du plan du sol)",lblCamH:"Hauteur caméra",lblTilt:"Inclinaison vers le bas",lblEdgeTh:"Sensibilité des bords",
+  hRec:"Journal et voix",swCsv:"Journal CSV (0,2 s)",swTts:"Synthèse vocale",lblRate:"Vitesse de lecture",
+  btnCsv:"Enregistrer CSV",btnTest:"Test vocal",
+  hRoute:"Itinéraire (accumuler plusieurs passages)",phRouteNew:"Nouvel itinéraire (ex. Maison → Gare Nord)",btnRouteAdd:"Ajouter l'itinéraire",
+  hCollect:"① Collecter des images",btnCap:"Filmer l'itinéraire",btnCapStop:"Arrêter (toucher = capturer)",
+  btnVid:"Charger une vidéo",hintCollect:"Image auto toutes les 1,5 s. Dites « marque » ou touchez pour capturer. Vidéo : ~1 image/s.",
+  hAnno:"② Tracer les bords à la main",mAuto:"Auto",mV:"Vert.",mH:"Horiz.",mUndo:"Annuler",mClear:"Effacer",
+  btnAnnoSave:"Enregistrer l'annotation",hintAnno:"Tracez le bord avec le doigt ; il sera redressé. Vertical = jaune, horizontal = orange.",
+  hTrain:"③ Lancer l'apprentissage",btnTrain:"Entraîner le modèle de cet itinéraire",btnTraining:"Apprentissage…",
+  trainSelRoute:"Sélectionnez un itinéraire",
+  trainFmt:(r,nV,nH,mv,dt)=>`Itinéraire « ${r} »  données : V ${nV} / H ${nH}`+(mv?`  entraîné : v${mv} (${dt})`:"  non entraîné"),
+  hRecords:"Journal d'apprentissage et de mesure",recEmpty:"(aucun enregistrement)",btnExport:"Exporter JSON",btnImport:"Importer JSON",btnWipe:"Tout supprimer",
+  hintRecords:"Exportez échantillons, poids et historique ; importez sur un autre appareil pour poursuivre.",
+  micOn:"Voix ON",micOff:"Voix OFF",vsIdle:"arrêté",vsListen:"à l'écoute",vsNoSupport:"non pris en charge",vsDenied:"micro refusé",
+  modelApplied:(v,r)=>`Modèle v${v} : ${r}`,modelUntrained:"Itinéraire non entraîné (détection standard)",
+  aNeedRoute:"Sélectionnez ou ajoutez d'abord un itinéraire",aNeedFrameRoute:"Sélectionnez une image et un itinéraire",
+  aNeedData:"Données insuffisantes. Annotez quelques images.",aNeedBoth:"Annotations verticales et horizontales requises",
+  aWipe:"Supprimer TOUTES les données ?",aImported:"Importé",aImportFail:"Échec de l'import : ",swMorse:"Signaux Morse",lblBodyW:"Largeur du corps",lblHorizon:"Temps de prédiction",swVib:"Vibration Morse",vibNoSupport:"API de vibration non prise en charge (indisponible sur navigateurs iPhone)",swPitch:"Vitesse par cadence",lblStride:"Longueur de pas",diagInsecure:"Ouvrez via HTTPS (caméra bloquée en http/fichier par le navigateur)",diagIframe:"Caméra bloquée dans cet aperçu intégré. Téléchargez le fichier HTML et hébergez-le en HTTPS ou ouvrez-le directement dans le navigateur",diagDenied:"Permission caméra refusée. Autorisez la caméra dans les réglages du site",diagNoCam:"Aucune caméra trouvée",diagBusy:"Caméra utilisée par une autre application. Fermez-la et réessayez",aCamErr:"Caméra indisponible : "}},
+zh:{name:"中文",tts:"zh-CN",sr:"zh-CN",
+ cmd:{start:/开始|開始/,stop:/结束|結束|停止/,mark:/标记|標記|拍照/},
+ sp:{align:"请将屏幕中央对准身体正中",start:"开始测量",stop:"测量结束",
+  slow:"请走慢一点",clear:"前方畅通",annoSaved:"标注已保存",
+  trained:v=>`学习完成。版本${v}`,rateDemo:"以此速度朗读",
+  capStart:"开始拍摄路线。说「标记」即可截取当前画面",vidDone:"已从视频提取画面",
+  dist:{1:"50厘米",2:"1米",3:"2米"},latC:"正中",side:{r:"右侧",l:"左侧"},
+  lat50:s=>`${s}50厘米`,lat1:s=>`${s}1米`,latOut:s=>`${s}1米以外`,
+  edgeH:"横向边缘",edgeV:"纵向边缘",
+  phrase:(d,l,e)=>`前方${d}，${l}，有${e}`},
+ ui:{tabLive:"测 量",tabLearn:"学 习",tabRec:"记 录",
+  statusIdle:"待机",statusRun:"测量中",statusAlign:"对准中",statusNoCam:"无法使用相机",
+  calloutInit:"点按或说「开始」",calloutDone:"已结束",
+  btnStart:"开 始",btnStop:"结 束",
+  hintLive:"支持点按与语音操作。对准提示后4秒开始测量。播报＝前方距离＋距中央的横向位置。",
+  hRouteModel:"使用的路线模型",optStandard:"（仅标准检测）",
+  hScreen:"画面调整",lblBin:"黑白二值化",lblBinTh:"二值阈值",lblBright:"亮度",lblContrast:"对比度",
+  hDist:"距离换算（地面平面模型）",lblCamH:"相机高度",lblTilt:"向下角度",lblEdgeTh:"边缘灵敏度",
+  hRec:"记录与语音",swCsv:"CSV记录（每0.2秒）",swTts:"语音播报",lblRate:"朗读速度",
+  btnCsv:"保存CSV",btnTest:"语音测试",
+  hRoute:"路线（同一路线多次积累）",phRouteNew:"新路线名称（例：家→车站北口）",btnRouteAdd:"添加路线",
+  hCollect:"① 采集图像",btnCap:"用相机拍摄路线",btnCapStop:"停止拍摄（点按即截取）",
+  btnVid:"读取视频文件",hintCollect:"拍摄中每1.5秒自动截取。说「标记」或点按屏幕可立即截取。视频约每秒提取1帧。",
+  hAnno:"② 手绘边缘",mAuto:"自动判别",mV:"纵",mH:"横",mUndo:"撤销",mClear:"清空",
+  btnAnnoSave:"保存此图的标注",hintAnno:"用手指描出边缘，将自动拉直。纵＝黄色，横＝橙色。",
+  hTrain:"③ 执行学习",btnTrain:"训练此路线的模型",btnTraining:"学习中…",
+  trainSelRoute:"请选择路线",
+  trainFmt:(r,nV,nH,mv,dt)=>`路线「${r}」 教师数据：纵${nV}条／横${nH}条`+(mv?`　已训练: v${mv}（${dt}）`:"　未训练"),
+  hRecords:"学习与测量记录",recEmpty:"（暂无记录）",btnExport:"导出JSON",btnImport:"导入JSON",btnWipe:"删除全部数据",
+  hintRecords:"可将教师样本、模型权重与历史一并导出，在其他设备导入以继续学习。",
+  micOn:"语音开",micOff:"语音关",vsIdle:"已停止",vsListen:"聆听中",vsNoSupport:"设备不支持",vsDenied:"麦克风被拒绝",
+  modelApplied:(v,r)=>`学习模型 v${v}：${r}`,modelUntrained:"此路线未训练（标准检测）",
+  aNeedRoute:"请先选择或添加路线",aNeedFrameRoute:"请选择画面和路线",
+  aNeedData:"教师数据不足。请为若干画面保存标注。",aNeedBoth:"需要纵向和横向两种标注",
+  aWipe:"将删除所有学习数据、模型与记录。确定吗？",aImported:"已导入",aImportFail:"导入失败: ",swMorse:"摩尔斯信号",lblBodyW:"身体宽度",lblHorizon:"预测时间",swVib:"摩尔斯振动",vibNoSupport:"此设备不支持振动API（iPhone浏览器不可用）",swPitch:"步频测速",lblStride:"步幅",diagInsecure:"请通过HTTPS打开（浏览器在http/file下禁止使用相机）",diagIframe:"此嵌入预览中无法使用相机。请下载HTML文件，放到HTTPS网站或在浏览器中直接打开",diagDenied:"相机权限被拒绝。请在浏览器网站设置中允许相机",diagNoCam:"未找到相机",diagBusy:"相机正被其他应用占用。请关闭后重试",aCamErr:"无法使用相机: "}},
+ko:{name:"한국어",tts:"ko-KR",sr:"ko-KR",
+ cmd:{start:/시작/,stop:/종료|정지|중지/,mark:/마크|표시|캡처/},
+ sp:{align:"화면 중앙을 몸의 중앙에 맞춰 주세요",start:"측정을 시작합니다",stop:"측정을 종료합니다",
+  slow:"조금 천천히 걸어 주세요",clear:"전방 이상 없음",annoSaved:"주석을 저장했습니다",
+  trained:v=>`학습이 완료되었습니다. 버전 ${v}`,rateDemo:"이 속도로 읽습니다",
+  capStart:"경로 촬영을 시작합니다. 마크, 라고 말하면 현재 화면을 저장합니다",vidDone:"동영상에서 프레임을 추출했습니다",
+  dist:{1:"50센티미터",2:"1미터",3:"2미터"},latC:"중앙",side:{r:"오른쪽",l:"왼쪽"},
+  lat50:s=>`${s} 50센티미터`,lat1:s=>`${s} 1미터`,latOut:s=>`${s} 1미터 밖`,
+  edgeH:"가로 에지",edgeV:"세로 에지",
+  phrase:(d,l,e)=>`전방 ${d}, ${l}, ${e} 있음`},
+ ui:{tabLive:"측 정",tabLearn:"학 습",tabRec:"기 록",
+  statusIdle:"대기 중",statusRun:"측정 중",statusAlign:"정렬 중",statusNoCam:"카메라를 사용할 수 없음",
+  calloutInit:"탭하거나 「시작」이라고 말하세요",calloutDone:"종료했습니다",
+  btnStart:"시 작",btnStop:"종 료",
+  hintLive:"탭과 음성 모두 지원. 정렬 안내 후 4초 뒤 측정 시작. 안내＝전방 거리＋중앙 기준 좌우 위치.",
+  hRouteModel:"사용할 경로 모델",optStandard:"(표준 검출만)",
+  hScreen:"화면 조정",lblBin:"흑백 이진화",lblBinTh:"이진화 임계값",lblBright:"밝기",lblContrast:"대비",
+  hDist:"거리 환산(지면 평면 모델)",lblCamH:"카메라 높이",lblTilt:"하향 각도",lblEdgeTh:"에지 감도",
+  hRec:"기록·음성",swCsv:"CSV 기록(0.2초마다)",swTts:"음성 안내",lblRate:"읽기 속도",
+  btnCsv:"CSV 저장",btnTest:"음성 테스트",
+  hRoute:"경로(같은 길을 여러 번 축적)",phRouteNew:"새 경로 이름(예: 집→역 북쪽 출구)",btnRouteAdd:"경로 추가",
+  hCollect:"① 이미지 수집",btnCap:"카메라로 경로 촬영",btnCapStop:"촬영 중지(탭=즉시 캡처)",
+  btnVid:"동영상 파일 불러오기",hintCollect:"촬영 중 1.5초마다 자동 캡처. 「마크」 발화나 화면 탭으로 즉시 캡처. 동영상은 약 1초 간격 추출.",
+  hAnno:"② 에지를 손으로 그리기",mAuto:"자동 판별",mV:"세로",mH:"가로",mUndo:"되돌리기",mClear:"모두 지우기",
+  btnAnnoSave:"이 화면의 주석 저장",hintAnno:"손가락으로 에지를 따라 그리면 직선으로 보정됩니다. 세로=노랑, 가로=주황.",
+  hTrain:"③ 학습 실행",btnTrain:"이 경로의 모델 학습",btnTraining:"학습 중…",
+  trainSelRoute:"경로를 선택하세요",
+  trainFmt:(r,nV,nH,mv,dt)=>`경로 「${r}」 교사 데이터: 세로 ${nV}건 / 가로 ${nH}건`+(mv?`  학습됨: v${mv} (${dt})`:"  미학습"),
+  hRecords:"학습·측정 기록",recEmpty:"(기록 없음)",btnExport:"JSON 내보내기",btnImport:"JSON 불러오기",btnWipe:"모든 데이터 삭제",
+  hintRecords:"교사 샘플·학습 가중치·이력을 함께 내보내고, 다른 기기에서 불러와 이어서 학습할 수 있습니다.",
+  micOn:"음성 ON",micOff:"음성 OFF",vsIdle:"정지",vsListen:"대기 중",vsNoSupport:"미지원 기기",vsDenied:"마이크 거부됨",
+  modelApplied:(v,r)=>`학습 모델 v${v}: ${r}`,modelUntrained:"이 경로는 미학습(표준 검출)",
+  aNeedRoute:"먼저 경로를 선택·추가하세요",aNeedFrameRoute:"프레임과 경로를 선택하세요",
+  aNeedData:"교사 데이터가 부족합니다. 몇 프레임의 주석을 저장하세요.",aNeedBoth:"세로·가로 두 주석이 모두 필요합니다",
+  aWipe:"학습 데이터·모델·기록을 모두 삭제합니다. 계속할까요?",aImported:"불러왔습니다",aImportFail:"불러오기 실패: ",swMorse:"모스 신호",lblBodyW:"신체 폭",lblHorizon:"예측 시간",swVib:"모스 진동",vibNoSupport:"이 기기는 진동 API를 지원하지 않습니다(iPhone 브라우저에서는 사용 불가)",swPitch:"보행 피치 속도",lblStride:"보폭",diagInsecure:"HTTPS로 열어 주세요(브라우저는 http/file에서 카메라를 차단합니다)",diagIframe:"임베드 미리보기에서는 카메라를 사용할 수 없습니다. HTML 파일을 내려받아 HTTPS에 올리거나 브라우저에서 직접 여세요",diagDenied:"카메라 권한이 거부되었습니다. 브라우저 사이트 설정에서 카메라를 허용하세요",diagNoCam:"카메라를 찾을 수 없습니다",diagBusy:"다른 앱이 카메라를 사용 중입니다. 종료 후 다시 시도하세요",aCamErr:"카메라를 사용할 수 없음: "}},
+it:{name:"Italiano",tts:"it-IT",sr:"it-IT",
+ cmd:{start:/inizi|avvia|\bstart\b/i,stop:/\bstop\b|ferm|termin|\bfine\b/i,mark:/segna|\bmark\b|cattur/i},
+ sp:{align:"Posiziona il centro dello schermo al centro del tuo corpo",start:"Inizio della misurazione",stop:"Misurazione terminata",
+  slow:"Cammina un po' più lentamente, per favore",clear:"Percorso libero",annoSaved:"Annotazione salvata",
+  trained:v=>`Addestramento completato. Versione ${v}`,rateDemo:"Lettura a questa velocità",
+  capStart:"Ripresa del percorso avviata. Di' « segna » per catturare il fotogramma",vidDone:"Fotogrammi estratti dal video",
+  dist:{1:"50 centimetri",2:"1 metro",3:"2 metri"},latC:"al centro",side:{r:"a destra",l:"a sinistra"},
+  lat50:s=>`${s} 50 centimetri`,lat1:s=>`${s} 1 metro`,latOut:s=>`${s} oltre 1 metro`,
+  edgeH:"bordo orizzontale",edgeV:"bordo verticale",
+  phrase:(d,l,e)=>`Avanti ${d}, ${l}, ${e}`},
+ ui:{tabLive:"MISURA",tabLearn:"APPRENDI",tabRec:"REGISTRO",
+  statusIdle:"In attesa",statusRun:"Misurazione",statusAlign:"Allineamento",statusNoCam:"Fotocamera non disponibile",
+  calloutInit:"Tocca o di' « inizia »",calloutDone:"Terminato",
+  btnStart:"INIZIA",btnStop:"STOP",
+  hintLive:"Comandi touch o vocali. Dopo l'invito all'allineamento, la misura parte in 4 s. Annuncio = distanza avanti + scostamento laterale.",
+  hRouteModel:"Modello di percorso in uso",optStandard:"(solo rilevamento standard)",
+  hScreen:"Schermo",lblBin:"Vista bianco/nero",lblBinTh:"Soglia binarizzazione",lblBright:"Luminosità",lblContrast:"Contrasto",
+  hDist:"Distanza (modello del piano del suolo)",lblCamH:"Altezza fotocamera",lblTilt:"Inclinazione in basso",lblEdgeTh:"Sensibilità bordi",
+  hRec:"Registro e voce",swCsv:"Registro CSV (0,2 s)",swTts:"Sintesi vocale",lblRate:"Velocità di lettura",
+  btnCsv:"Salva CSV",btnTest:"Test vocale",
+  hRoute:"Percorso (accumula più passaggi)",phRouteNew:"Nuovo percorso (es. Casa → Stazione Nord)",btnRouteAdd:"Aggiungi percorso",
+  hCollect:"① Raccogli immagini",btnCap:"Riprendi il percorso",btnCapStop:"Ferma (tocco = cattura)",
+  btnVid:"Carica un video",hintCollect:"Fotogramma automatico ogni 1,5 s. Di' « segna » o tocca per catturare. Video: ~1 fotogramma/s.",
+  hAnno:"② Disegna i bordi a mano",mAuto:"Auto",mV:"Vert.",mH:"Orizz.",mUndo:"Annulla",mClear:"Cancella",
+  btnAnnoSave:"Salva l'annotazione",hintAnno:"Traccia il bordo col dito; verrà raddrizzato. Verticale = giallo, orizzontale = arancione.",
+  hTrain:"③ Avvia l'addestramento",btnTrain:"Addestra il modello di questo percorso",btnTraining:"Addestramento…",
+  trainSelRoute:"Seleziona un percorso",
+  trainFmt:(r,nV,nH,mv,dt)=>`Percorso « ${r} »  dati: V ${nV} / O ${nH}`+(mv?`  addestrato: v${mv} (${dt})`:"  non addestrato"),
+  hRecords:"Registro di apprendimento e misura",recEmpty:"(nessun record)",btnExport:"Esporta JSON",btnImport:"Importa JSON",btnWipe:"Elimina tutto",
+  hintRecords:"Esporta campioni, pesi e cronologia; importa su un altro dispositivo per continuare.",
+  micOn:"Voce ON",micOff:"Voce OFF",vsIdle:"fermo",vsListen:"in ascolto",vsNoSupport:"non supportato",vsDenied:"microfono negato",
+  modelApplied:(v,r)=>`Modello v${v}: ${r}`,modelUntrained:"Percorso non addestrato (rilevamento standard)",
+  aNeedRoute:"Seleziona o aggiungi prima un percorso",aNeedFrameRoute:"Seleziona un fotogramma e un percorso",
+  aNeedData:"Dati insufficienti. Annota alcuni fotogrammi.",aNeedBoth:"Servono annotazioni verticali e orizzontali",
+  aWipe:"Eliminare TUTTI i dati?",aImported:"Importato",aImportFail:"Importazione fallita: ",swMorse:"Segnali Morse",lblBodyW:"Larghezza corpo",lblHorizon:"Tempo di previsione",swVib:"Vibrazione Morse",vibNoSupport:"API di vibrazione non supportata (non disponibile nei browser iPhone)",swPitch:"Velocità da cadenza",lblStride:"Lunghezza del passo",diagInsecure:"Apri via HTTPS (il browser blocca la fotocamera su http/file)",diagIframe:"Fotocamera bloccata in questa anteprima incorporata. Scarica il file HTML e ospitalo su HTTPS oppure aprilo direttamente nel browser",diagDenied:"Permesso fotocamera negato. Consenti la fotocamera nelle impostazioni del sito",diagNoCam:"Nessuna fotocamera trovata",diagBusy:"Fotocamera usata da un altra app. Chiudila e riprova",aCamErr:"Fotocamera non disponibile: "}},
+de:{name:"Deutsch",tts:"de-DE",sr:"de-DE",
+ cmd:{start:/start|beginn|\blos\b/i,stop:/stopp|\bstop\b|ende|beend/i,mark:/markier|\bmark\b|aufnahme/i},
+ sp:{align:"Halten Sie die Bildschirmmitte vor Ihre Körpermitte",start:"Messung beginnt",stop:"Messung beendet",
+  slow:"Bitte gehen Sie etwas langsamer",clear:"Weg frei",annoSaved:"Annotation gespeichert",
+  trained:v=>`Training abgeschlossen. Version ${v}`,rateDemo:"Vorlesen in dieser Geschwindigkeit",
+  capStart:"Routenaufnahme gestartet. Sagen Sie „markieren“, um das Bild zu erfassen",vidDone:"Bilder aus dem Video extrahiert",
+  dist:{1:"50 Zentimeter",2:"1 Meter",3:"2 Meter"},latC:"Mitte",side:{r:"rechts",l:"links"},
+  lat50:s=>`${s} 50 Zentimeter`,lat1:s=>`${s} 1 Meter`,latOut:s=>`${s} über 1 Meter`,
+  edgeH:"horizontale Kante",edgeV:"vertikale Kante",
+  phrase:(d,l,e)=>`Voraus ${d}, ${l}, ${e}`},
+ ui:{tabLive:"MESSEN",tabLearn:"LERNEN",tabRec:"PROTOKOLL",
+  statusIdle:"Bereit",statusRun:"Messung läuft",statusAlign:"Ausrichten",statusNoCam:"Kamera nicht verfügbar",
+  calloutInit:"Tippen oder „Start“ sagen",calloutDone:"Beendet",
+  btnStart:"START",btnStop:"STOPP",
+  hintLive:"Bedienung per Tippen oder Sprache. Nach der Ausricht-Ansage beginnt die Messung in 4 s. Ansage = Distanz voraus + seitlicher Versatz.",
+  hRouteModel:"Verwendetes Routenmodell",optStandard:"(nur Standarderkennung)",
+  hScreen:"Anzeige",lblBin:"Schwarz-Weiß-Ansicht",lblBinTh:"Binarisierungsschwelle",lblBright:"Helligkeit",lblContrast:"Kontrast",
+  hDist:"Distanz (Bodenebenen-Modell)",lblCamH:"Kamerahöhe",lblTilt:"Neigung nach unten",lblEdgeTh:"Kantenempfindlichkeit",
+  hRec:"Protokoll & Sprache",swCsv:"CSV-Protokoll (alle 0,2 s)",swTts:"Sprachausgabe",lblRate:"Vorlesegeschwindigkeit",
+  btnCsv:"CSV speichern",btnTest:"Sprachtest",
+  hRoute:"Route (mehrere Durchgänge sammeln)",phRouteNew:"Neuer Routenname (z. B. Zuhause → Bahnhof Nord)",btnRouteAdd:"Route hinzufügen",
+  hCollect:"① Bilder sammeln",btnCap:"Route mit Kamera aufnehmen",btnCapStop:"Aufnahme stoppen (Tippen = Bild)",
+  btnVid:"Videodatei laden",hintCollect:"Automatisches Bild alle 1,5 s. „Markieren“ sagen oder tippen für Sofortbild. Video: ~1 Bild/s.",
+  hAnno:"② Kanten von Hand zeichnen",mAuto:"Auto",mV:"Vert.",mH:"Horiz.",mUndo:"Zurück",mClear:"Löschen",
+  btnAnnoSave:"Annotation dieses Bildes speichern",hintAnno:"Kante mit dem Finger nachziehen; sie wird begradigt. Vertikal = gelb, horizontal = orange.",
+  hTrain:"③ Training starten",btnTrain:"Modell dieser Route trainieren",btnTraining:"Training…",
+  trainSelRoute:"Bitte Route wählen",
+  trainFmt:(r,nV,nH,mv,dt)=>`Route „${r}“  Daten: V ${nV} / H ${nH}`+(mv?`  trainiert: v${mv} (${dt})`:"  untrainiert"),
+  hRecords:"Trainings- & Messprotokoll",recEmpty:"(keine Einträge)",btnExport:"JSON exportieren",btnImport:"JSON importieren",btnWipe:"Alle Daten löschen",
+  hintRecords:"Beispiele, Gewichte und Verlauf gemeinsam exportieren; auf anderem Gerät importieren und weiterlernen.",
+  micOn:"Sprache AN",micOff:"Sprache AUS",vsIdle:"gestoppt",vsListen:"hört zu",vsNoSupport:"nicht unterstützt",vsDenied:"Mikrofon verweigert",
+  modelApplied:(v,r)=>`Modell v${v}: ${r}`,modelUntrained:"Route untrainiert (Standarderkennung)",
+  aNeedRoute:"Bitte zuerst eine Route wählen oder anlegen",aNeedFrameRoute:"Bild und Route wählen",
+  aNeedData:"Zu wenig Trainingsdaten. Bitte einige Bilder annotieren.",aNeedBoth:"Vertikale und horizontale Annotationen nötig",
+  aWipe:"ALLE Trainingsdaten, Modelle und Protokolle löschen?",aImported:"Importiert",aImportFail:"Import fehlgeschlagen: ",swMorse:"Morsesignale",lblBodyW:"Körperbreite",lblHorizon:"Vorhersagezeit",swVib:"Morse-Vibration",vibNoSupport:"Vibrations-API nicht unterstützt (in iPhone-Browsern nicht verfügbar)",swPitch:"Schrittfrequenz-Tempo",lblStride:"Schrittlänge",diagInsecure:"Über HTTPS öffnen (Browser blockiert die Kamera unter http/file)",diagIframe:"Kamera in dieser eingebetteten Vorschau blockiert. HTML-Datei herunterladen und per HTTPS hosten oder direkt im Browser öffnen",diagDenied:"Kamerazugriff verweigert. Kamera in den Website-Einstellungen erlauben",diagNoCam:"Keine Kamera gefunden",diagBusy:"Kamera wird von einer anderen App verwendet. Schließen und erneut versuchen",aCamErr:"Kamera nicht verfügbar: "}}
+};
+let curLang="ja";
+const L=()=>LANGS[curLang];
+
+/* ---------------- 保存アダプタ ---------------- */
+const store={
+  async get(k){
+    try{ if(window.storage){ const r=await window.storage.get("okimo:"+k); return r?JSON.parse(r.value):null; } }catch(e){}
+    try{ const v=localStorage.getItem("okimo:"+k); return v?JSON.parse(v):null; }catch(e){}
+    return null;
+  },
+  async set(k,v){
+    const s=JSON.stringify(v);
+    try{ if(window.storage){ await window.storage.set("okimo:"+k,s); return true; } }catch(e){}
+    try{ localStorage.setItem("okimo:"+k,s); return true; }catch(e){ log("save error: "+e.message); }
+    return false;
+  },
+  async del(k){
+    try{ if(window.storage){ await window.storage.delete("okimo:"+k); } }catch(e){}
+    try{ localStorage.removeItem("okimo:"+k); }catch(e){}
+  }
+};
+
+/* ---------------- 状態 ---------------- */
+const state={
+  running:false, aligned:false, stream:null, raf:0,
+  lastSpeak:0, lastPhrase:"", lastSlowWarn:0, badSince:0,
+  accelFwd:0, motionOK:false, speed:0,
+  morseNext:0, lastMorse:"",
+  stepTimes:[], accLP:0, lastStepT:0,
+  csv:[], csvTimer:0, sessionStart:0,
+  hazards:{h:null,v:null}, edgeCount:0,
+  model:null, curLiveRoute:"",
+  routes:[], curRoute:"",
+  frames:[], selFrame:-1,
+  capTimer:0, capStream:null, capturing:false,
+  drawMode:"auto", strokes:[], drawing:null,
+  recLog:[]
+};
+
+/* ---------------- UI 値 ---------------- */
+const ui={
+  get binOn(){return $("binOn").checked;}, get binTh(){return +$("binTh").value;},
+  get bright(){return +$("bright").value;}, get contrast(){return +$("contrast").value/100;},
+  get camH(){return +$("camH").value/100;}, get tilt(){return +$("tilt").value*Math.PI/180;},
+  get edgeTh(){return +$("edgeTh").value;},
+  get csvOn(){return $("csvOn").checked;}, get ttsOn(){return $("ttsOn").checked;},
+  get ttsRate(){return +$("ttsRate").value/100;},
+  get morseOn(){return $("morseOn").checked;},
+  get vibOn(){return $("vibOn").checked;},
+  get pitchOn(){return $("pitchOn").checked;},
+  get stride(){return +$("stride").value/100;},
+  get bodyW(){return +$("bodyW").value/100;},      // m
+  get horizon(){return +$("horizon").value/10;}    // s
+};
+[["binTh","binThV",v=>v],["bright","brightV",v=>v],["contrast","contrastV",v=>v+"%"],
+ ["camH","camHV",v=>v+"cm"],["tilt","tiltV",v=>v+"°"],["edgeTh","edgeThV",v=>v],
+ ["ttsRate","ttsRateV",v=>(v/100).toFixed(2)+"×"],
+ ["bodyW","bodyWV",v=>v+"cm"],["horizon","horizonV",v=>(v/10).toFixed(1)+"s"],["stride","strideV",v=>v+"cm"]]
+.forEach(([i,o,f])=>$(i).addEventListener("input",()=>$(o).textContent=f($(i).value)));
+$("ttsRate").addEventListener("change",async()=>{
+  await store.set("ttsRate",ui.ttsRate);
+  speak(L().sp.rateDemo,true);
+});
+
+/* ---------------- 言語適用 ---------------- */
+function applyLang(){
+  const U=L().ui;
+  document.documentElement.lang=curLang;
+  $("navLive").textContent=U.tabLive; $("navLearn").textContent=U.tabLearn; $("navRec").textContent=U.tabRec;
+  $("btnStart").textContent=U.btnStart; $("btnStop").textContent=U.btnStop;
+  $("hintLive").textContent=U.hintLive;
+  $("hRouteModel").textContent=U.hRouteModel;
+  $("hScreen").textContent=U.hScreen;
+  $("lblBin").textContent=U.lblBin; $("lblBinTh").textContent=U.lblBinTh;
+  $("lblBright").textContent=U.lblBright; $("lblContrast").textContent=U.lblContrast;
+  $("hDist").textContent=U.hDist;
+  $("lblCamH").textContent=U.lblCamH; $("lblTilt").textContent=U.lblTilt; $("lblEdgeTh").textContent=U.lblEdgeTh;
+  $("hRec").textContent=U.hRec;
+  $("swCsv").textContent=U.swCsv; $("swTts").textContent=U.swTts; $("lblRate").textContent=U.lblRate;
+  $("swMorse").textContent=U.swMorse; $("swVib").textContent=U.swVib; $("swPitch").textContent=U.swPitch; $("lblStride").textContent=U.lblStride; $("lblBodyW").textContent=U.lblBodyW; $("lblHorizon").textContent=U.lblHorizon;
+  $("btnCsv").textContent=U.btnCsv; $("btnTest").textContent=U.btnTest;
+  $("hRoute").textContent=U.hRoute; $("routeNew").placeholder=U.phRouteNew; $("btnRouteAdd").textContent=U.btnRouteAdd;
+  $("hCollect").textContent=U.hCollect;
+  $("btnCap").textContent=state.capturing?U.btnCapStop:U.btnCap;
+  $("btnVid").textContent=U.btnVid; $("hintCollect").textContent=U.hintCollect;
+  $("hAnno").textContent=U.hAnno;
+  $("mAuto").textContent=U.mAuto; $("mV").textContent=U.mV; $("mH").textContent=U.mH;
+  $("mUndo").textContent=U.mUndo; $("mClear").textContent=U.mClear;
+  $("btnAnnoSave").textContent=U.btnAnnoSave; $("hintAnno").textContent=U.hintAnno;
+  $("hTrain").textContent=U.hTrain; $("btnTrain").textContent=U.btnTrain;
+  $("hRecords").textContent=U.hRecords;
+  $("btnExport").textContent=U.btnExport; $("btnImport").textContent=U.btnImport; $("btnWipe").textContent=U.btnWipe;
+  $("hintRecords").textContent=U.hintRecords;
+  setStatus(state.running?(state.aligned?U.statusRun:U.statusAlign):U.statusIdle,false);
+  if(!state.running) setCallout(U.calloutInit);
+  const opt0=$("liveRoute").querySelector('option[value=""]');
+  if(opt0) opt0.textContent=U.optStandard;
+  micUI(); updateTrainInfo(); renderRec();
+  applyRouteModel($("liveRoute").value||"");
+}
+function buildLangSel(){
+  const sel=$("langSel");
+  sel.innerHTML="";
+  for(const k in LANGS) sel.insertAdjacentHTML("beforeend",`<option value="${k}">${LANGS[k].name}</option>`);
+  sel.value=curLang;
+  sel.addEventListener("change",async e=>{
+    curLang=e.target.value;
+    await store.set("lang",curLang);
+    if(recog){ // 認識言語を切替（稼働中なら再起動）
+      try{recog.stop();}catch(err){}
+      recog=null;
+      if(recogOn){ recog=initRecog(); if(recog){try{recog.start();}catch(err){}} }
+    }
+    applyLang();
+    speak(L().sp.rateDemo,true);
+  });
+}
+
+function log(m){
+  const el=$("log");
+  el.textContent=new Date().toLocaleTimeString()+"  "+m+"\n"+el.textContent.split("\n").slice(0,7).join("\n");
+}
+function setStatus(t,warn){
+  const s=$("status"); s.textContent=t;
+  s.style.color=warn?"var(--near)":"var(--edge)";
+  s.style.borderLeftColor=warn?"var(--near)":"var(--edge)";
+}
+function setCallout(t){ $("calloutText").textContent=t; }
+async function addRec(type,detail){
+  state.recLog.unshift({t:new Date().toISOString(), type, detail});
+  state.recLog=state.recLog.slice(0,400);
+  await store.set("log",state.recLog);
+  renderRec();
+}
+function renderRec(){
+  $("recList").textContent = state.recLog.length===0 ? L().ui.recEmpty :
+    state.recLog.map(r=>`${r.t.replace("T"," ").slice(0,19)}  [${r.type}] ${r.detail}`).join("\n");
+}
+
+/* ---------------- タブ ---------------- */
+document.querySelectorAll("nav button").forEach(b=>{
+  b.addEventListener("click",()=>{
+    document.querySelectorAll("nav button").forEach(x=>x.classList.remove("act"));
+    document.querySelectorAll(".tab").forEach(x=>x.classList.remove("act"));
+    b.classList.add("act"); $("tab-"+b.dataset.tab).classList.add("act");
+    if(b.dataset.tab!=="learn") stopCapture();
+  });
+});
+
+/* ---------------- 音声出力 ---------------- */
+function speak(text,force){
+  if(!ui.ttsOn && !force) return;
+  const now=performance.now();
+  const gapSame=2200/ui.ttsRate, gapAny=1400/ui.ttsRate;
+  if(!force && now-state.lastSpeak<gapSame && text===state.lastPhrase) return;
+  if(!force && now-state.lastSpeak<gapAny) return;
+  try{
+    speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(text); u.lang=L().tts; u.rate=ui.ttsRate;
+    speechSynthesis.speak(u);
+    state.lastSpeak=now; state.lastPhrase=text;
+  }catch(e){}
+}
+$("vibOn").addEventListener("change",()=>{
+  if(ui.vibOn){
+    if(!navigator.vibrate){ alert(L().ui.vibNoSupport); $("vibOn").checked=false; return; }
+    navigator.vibrate([225,75,75,75,225]);   // K の振動デモ
+  } else { try{navigator.vibrate(0);}catch(e){} }
+});
+$("morseOn").addEventListener("change",()=>{
+  if(ui.morseOn){ morse.ensure(); morse.play("-.-",1); }   // ONにした瞬間にK一回で音量確認
+});
+$("btnTest").addEventListener("click",()=>{
+  const S=L().sp;
+  speak(S.phrase(S.dist[2],S.lat50(S.side.r),S.edgeH),true);
+});
+
+/* ---------------- 音声認識 ---------------- */
+let recog=null, recogOn=false;
+function initRecog(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){ $("voiceState").textContent=L().ui.vsNoSupport; return null; }
+  const r=new SR();
+  r.lang=L().sr; r.continuous=true; r.interimResults=false;
+  r.onresult=e=>{
+    const t=e.results[e.results.length-1][0].transcript.trim();
+    $("voiceHeard").textContent="「"+t+"」";
+    handleVoice(t);
+  };
+  r.onend=()=>{ if(recogOn){ try{r.start();}catch(e){} } };
+  r.onerror=e=>{ if(e.error==="not-allowed"){ recogOn=false; micUI(); $("voiceState").textContent=L().ui.vsDenied; } };
+  return r;
+}
+function handleVoice(t){
+  const C=L().cmd;
+  if(C.start.test(t)){ addRec("voice","start"); start(); }
+  else if(C.stop.test(t)){ addRec("voice","stop"); stop(); }
+  else if(C.mark.test(t)){ if(state.capturing){ captureLearnFrame(); addRec("voice","mark"); } }
+}
+function micUI(){
+  const U=L().ui;
+  $("micBtn").textContent="🎙 "+(recogOn?U.micOn:U.micOff);
+  $("micBtn").classList.toggle("on",recogOn);
+  $("voiceState").textContent=recogOn?U.vsListen:U.vsIdle;
+}
+$("micBtn").addEventListener("click",()=>{
+  if(!recog) recog=initRecog();
+  if(!recog) return;
+  recogOn=!recogOn;
+  if(recogOn){ try{recog.start();}catch(e){} } else { try{recog.stop();}catch(e){} }
+  micUI();
+});
+
+/* ---------------- 距離換算 ---------------- */
+function rowToDist(y){
+  const fy=(PH/2)/Math.tan(VFOV/2);
+  const ang=ui.tilt+Math.atan((y-PH/2)/fy);
+  if(ang<=0.02) return Infinity;
+  return ui.camH/Math.tan(ang);
+}
+function distZone(d){
+  if(d<=0.5) return {zone:1};
+  if(d<=1.0) return {zone:2};
+  if(d<=2.0) return {zone:3};
+  return null;
+}
+function fxVal(){ return (PW/2)/(Math.tan(VFOV/2)*PW/PH); }
+function latOf(x,d){ return d*(x-PW/2)/fxVal(); }
+function latZone(lat){
+  const a=Math.abs(lat), side=lat>0?"r":"l";
+  if(a<=0.25) return {zone:0,side:"c",code:"C"};
+  if(a<=0.5)  return {zone:1,side,code:(side==="r"?"R":"L")+"50"};
+  if(a<=1.0)  return {zone:2,side,code:(side==="r"?"R":"L")+"100"};
+  return {zone:3,side,code:(side==="r"?"R":"L")+">100"};
+}
+function latLabel(lz){
+  const S=L().sp;
+  if(lz.zone===0) return S.latC;
+  const sd=S.side[lz.side];
+  return lz.zone===1?S.lat50(sd):(lz.zone===2?S.lat1(sd):S.latOut(sd));
+}
+
+/* ---------------- 画像処理コア ---------------- */
+const gray=new Float32Array(PW*PH), gxA=new Float32Array(PW*PH), gyA=new Float32Array(PW*PH);
+function toGray(imgData){
+  const px=imgData.data, b=ui.bright, c=ui.contrast; let sum=0;
+  for(let i=0,j=0;i<px.length;i+=4,j++){
+    let g=0.299*px[i]+0.587*px[i+1]+0.114*px[i+2];
+    g=(g-128)*c+128+b; g=g<0?0:(g>255?255:g);
+    gray[j]=g; sum+=g;
+  }
+  return sum/(PW*PH);
+}
+function sobel(){
+  for(let y=1;y<PH-1;y++)for(let x=1;x<PW-1;x++){
+    const i=y*PW+x;
+    gxA[i]=(gray[i-PW+1]+2*gray[i+1]+gray[i+PW+1])-(gray[i-PW-1]+2*gray[i-1]+gray[i+PW-1]);
+    gyA[i]=(gray[i+PW-1]+2*gray[i+PW]+gray[i+PW+1])-(gray[i-PW-1]+2*gray[i-PW]+gray[i-PW+1]);
+  }
+}
+function feat(i,y){
+  const ax=Math.abs(gxA[i]), ay=Math.abs(gyA[i]);
+  return [1, ax/1020, ay/1020, ax/(ax+ay+1e-3), gray[i]/255, y/PH];
+}
+const sig=z=>1/(1+Math.exp(-z));
+const dot=(w,f)=>w[0]*f[0]+w[1]*f[1]+w[2]*f[2]+w[3]*f[3]+w[4]*f[4]+w[5]*f[5];
+
+function detect(){
+  const th=ui.edgeTh*4, m=state.model;
+  const loose=th*0.5;
+  const MINV=Math.round(PH*0.16), MINH=Math.round(PW*0.14);
+  const vSegs=[], hSegs=[];
+  for(let x=2;x<PW-2;x+=3){
+    let run=0,y0=0;
+    for(let y=1;y<PH-1;y++){
+      const i=y*PW+x, ax=Math.abs(gxA[i]), ay=Math.abs(gyA[i]);
+      let ok;
+      if(m){ ok = ax>loose && ax>ay && sig(dot(m.wV,feat(i,y)))>0.5; }
+      else { ok = ax>th && ax>1.6*ay; }
+      if(ok){ if(run===0)y0=y; run++; }
+      if(!ok||y===PH-2){ if(run>=MINV) vSegs.push({x,y0,y1:y0+run}); run=0; }
+    }
+  }
+  for(let y=2;y<PH-2;y+=3){
+    let run=0,x0=0;
+    for(let x=1;x<PW-1;x++){
+      const i=y*PW+x, ax=Math.abs(gxA[i]), ay=Math.abs(gyA[i]);
+      let ok;
+      if(m){ ok = ay>loose && ay>ax && sig(dot(m.wH,feat(i,y)))>0.5; }
+      else { ok = ay>th && ay>1.6*ax; }
+      if(ok){ if(run===0)x0=x; run++; }
+      if(!ok||x===PW-2){ if(run>=MINH) hSegs.push({y,x0,x1:x0+run}); run=0; }
+    }
+  }
+  return {vSegs,hSegs};
+}
+
+/* ---------------- 計測ループ ---------------- */
+function processFrame(){
+  const vw=video.videoWidth, vh=video.videoHeight;
+  if(!vw) return;
+  const s=Math.max(PW/vw,PH/vh), dw=vw*s, dh=vh*s;
+  pctx.drawImage(video,(PW-dw)/2,(PH-dh)/2,dw,dh);
+  const meanLum=toGray(pctx.getImageData(0,0,PW,PH));
+  sobel();
+  const {vSegs,hSegs}=detect();
+  state.edgeCount=vSegs.length+hSegs.length;
+
+  let hBest=null;
+  for(const s2 of hSegs){
+    const d=rowToDist(s2.y), z=distZone(d);
+    if(!z) continue;
+    const l0=latOf(s2.x0,d), l1=latOf(s2.x1,d);
+    let lz, lat;
+    if(l0<=0&&l1>=0){ lz={zone:0,side:"c",code:"C"}; lat=0; }
+    else { lat=Math.abs(l0)<Math.abs(l1)?l0:l1; lz=latZone(lat); }
+    if(!hBest||d<hBest.d) hBest={d,z,lz,lat,seg:s2};
+  }
+  let vBest=null;
+  for(const s2 of vSegs){
+    const d=rowToDist(s2.y1), z=distZone(d);
+    if(!z) continue;
+    const lat=latOf(s2.x,d), lz=latZone(lat);
+    if(!vBest||d<vBest.d) vBest={d,z,lz,lat,seg:s2};
+  }
+  state.hazards={h:hBest,v:vBest};
+
+  drawView(); drawHUD(vSegs,hSegs,hBest,vBest);
+
+  morseCycle(hBest,vBest);
+
+  if(!state.aligned) return;   // 位置合わせ中は読み上げ判断をしない
+
+  const now=performance.now(), S=L().sp;
+  const dark=meanLum<28||meanLum>235, nothing=state.edgeCount===0;
+  if(dark||nothing){
+    if(!state.badSince) state.badSince=now;
+    if(now-state.badSince>3000 && now-state.lastSlowWarn>6000){
+      speak(S.slow,true);
+      state.lastSlowWarn=now;
+      setCallout("⚠ "+S.slow);
+    }
+  }else{
+    state.badSince=0;
+    const inCorr=x=>x&&x.lz.zone<=2;
+    let primary=null;
+    const hIn=inCorr(hBest), vIn=inCorr(vBest);
+    if(hIn&&(!vIn||hBest.d<=vBest.d+0.3)) primary={ek:"edgeH",h:hBest};
+    else if(vIn) primary={ek:"edgeV",h:vBest};
+    else if(hBest||vBest) primary=hBest?{ek:"edgeH",h:hBest}:{ek:"edgeV",h:vBest};
+    if(primary){
+      const p=primary.h;
+      const phrase=S.phrase(S.dist[p.z.zone],latLabel(p.lz),S[primary.ek]);
+      setCallout(phrase); speak(phrase);
+    }else setCallout(S.clear);
+  }
+}
+function drawView(){
+  const out=pctx.createImageData(PW,PH), o=out.data, thr=ui.binTh, bin=ui.binOn;
+  for(let j=0;j<PW*PH;j++){
+    const g=bin?(gray[j]>=thr?255:0):gray[j];
+    o[j*4]=g;o[j*4+1]=g;o[j*4+2]=g;o[j*4+3]=255;
+  }
+  pctx.putImageData(out,0,0);
+  vctx.imageSmoothingEnabled=false;
+  vctx.drawImage(proc,0,0,view.width,view.height);
+}
+function drawHUD(vSegs,hSegs,hBest,vBest){
+  const W=hud.width,H=hud.height,sx=W/PW,sy=H/PH;
+  hctx.clearRect(0,0,W,H);
+  hctx.setLineDash([6,6]); hctx.lineWidth=1;
+  const fy=(PH/2)/Math.tan(VFOV/2), fx=fxVal();
+  [[0.5,"#ff5a3c","50cm"],[1.0,"#ffd400","1m"],[2.0,"#57d98a","2m"]].forEach(([d,col,lab])=>{
+    const yq=(PH/2)+fy*Math.tan(Math.atan(ui.camH/d)-ui.tilt);
+    if(yq>0&&yq<PH){
+      hctx.strokeStyle=col;
+      hctx.beginPath(); hctx.moveTo(0,yq*sy); hctx.lineTo(W,yq*sy); hctx.stroke();
+      hctx.fillStyle=col; hctx.font="bold 12px system-ui"; hctx.fillText(lab,6,yq*sy-4);
+      [0.5,1.0].forEach(lat=>{
+        [-1,1].forEach(sgn=>{
+          const xt=(PW/2)+fx*sgn*lat/d;
+          if(xt>0&&xt<PW){
+            hctx.beginPath(); hctx.moveTo(xt*sx,(yq-3)*sy); hctx.lineTo(xt*sx,(yq+3)*sy); hctx.stroke();
+          }
+        });
+      });
+    }
+  });
+  hctx.strokeStyle="rgba(255,255,255,.55)";
+  hctx.beginPath(); hctx.moveTo(W/2,H*0.35); hctx.lineTo(W/2,H); hctx.stroke();
+  hctx.setLineDash([]);
+  hctx.strokeStyle="#ffd400"; hctx.lineWidth=Math.max(4,W/160); hctx.lineCap="round";
+  hctx.beginPath();
+  for(const s2 of vSegs){ hctx.moveTo(s2.x*sx,s2.y0*sy); hctx.lineTo(s2.x*sx,s2.y1*sy); }
+  for(const s2 of hSegs){ hctx.moveTo(s2.x0*sx,s2.y*sy); hctx.lineTo(s2.x1*sx,s2.y*sy); }
+  hctx.stroke();
+  hctx.strokeStyle="#ff5a3c"; hctx.lineWidth=Math.max(6,W/110);
+  if(hBest){const s2=hBest.seg; hctx.beginPath(); hctx.moveTo(s2.x0*sx,s2.y*sy); hctx.lineTo(s2.x1*sx,s2.y*sy); hctx.stroke();}
+  if(vBest&&(!hBest||vBest.d<hBest.d)){const s2=vBest.seg; hctx.beginPath(); hctx.moveTo(s2.x*sx,s2.y0*sy); hctx.lineTo(s2.x*sx,s2.y1*sy); hctx.stroke();}
+}
+
+/* ---------------- 加速度 → 歩行速度推定 ---------------- */
+function onMotion(e){
+  const a=e.acceleration;
+  if(a&&a.z!=null){
+    state.accelFwd=-a.z; state.motionOK=true;
+    // 方式A: 漏れ積分による前進速度推定（減衰でドリフト抑制, 0〜2 m/s）
+    const dt=(e.interval&&e.interval<0.2)?e.interval:0.016;
+    state.speed=(state.speed+state.accelFwd*dt)*0.985;
+    if(state.speed<0) state.speed=0;
+    if(state.speed>2) state.speed=2;
+    // 方式B: 歩行ピッチ検出（加速度振幅のピークを1歩として計数）
+    const mag=Math.hypot(a.x||0,a.y||0,a.z||0);
+    state.accLP=state.accLP*0.7+mag*0.3;
+    const now=performance.now();
+    if(state.accLP>1.6 && now-state.lastStepT>300){
+      state.lastStepT=now;
+      state.stepTimes.push(now);
+      if(state.stepTimes.length>40) state.stepTimes.shift();
+    }
+  }
+}
+/* 現在の推定速度: 歩行ピッチ方式ON → 歩数率×歩幅 / OFF → 積分方式（センサー無しは1.2m/s仮定） */
+function estSpeed(){
+  if(ui.pitchOn){
+    const now=performance.now();
+    state.stepTimes=state.stepTimes.filter(t=>now-t<2500);
+    return (state.stepTimes.length/2.5)*ui.stride;   // steps/s × m/step
+  }
+  return state.motionOK?state.speed:1.2;
+}
+async function enableMotion(){
+  try{
+    if(typeof DeviceMotionEvent!=="undefined"&&typeof DeviceMotionEvent.requestPermission==="function"){
+      const r=await DeviceMotionEvent.requestPermission();
+      if(r!=="granted") return;
+    }
+    window.addEventListener("devicemotion",onMotion);
+  }catch(e){}
+}
+
+/* ---------------- モールス信号エンジン ---------------- */
+const morse={
+  actx:null, busy:false, unit:0.075, freq:800,
+  ensure(){
+    if(!this.actx){
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(!AC) return false;
+      this.actx=new AC();
+    }
+    if(this.actx.state==="suspended") this.actx.resume();
+    return true;
+  },
+  // seq: "-.-" 等。times回繰り返し（繰り返し間は7単位の語間）
+  play(seq,times){
+    if(!this.ensure()||this.busy) return 0;
+    const u=this.unit, ctx=this.actx;
+    let t=ctx.currentTime+0.05;
+    const osc=ctx.createOscillator(), g=ctx.createGain();
+    osc.type="sine"; osc.frequency.value=this.freq;
+    g.gain.setValueAtTime(0,t);
+    osc.connect(g); g.connect(ctx.destination);
+    const pat=[];                  // 振動パターン [on,off,on,off,...] ms
+    for(let r=0;r<times;r++){
+      for(const ch of seq){
+        const dur=(ch==="-")?3*u:u;
+        g.gain.setValueAtTime(0.0001,t);
+        g.gain.linearRampToValueAtTime(0.5,t+0.005);
+        g.gain.setValueAtTime(0.5,t+dur-0.005);
+        g.gain.linearRampToValueAtTime(0.0001,t+dur);
+        t+=dur+u;                 // 符号間 1単位
+        pat.push(Math.round(dur*1000), Math.round(u*1000));
+      }
+      pat[pat.length-1]+=Math.round(6*u*1000);   // 繰り返し間 計7単位
+      t+=6*u;
+    }
+    osc.start(); osc.stop(t+0.05);
+    if(ui.vibOn && navigator.vibrate){
+      setTimeout(()=>{ try{navigator.vibrate(pat);}catch(e){} }, 50);  // 音の開始遅延に同期
+    }
+    this.busy=true;
+    const ms=(t-ctx.currentTime)*1000;
+    setTimeout(()=>{ this.busy=false; }, ms+30);
+    return ms;
+  }
+};
+
+/* ---------------- モールス判定サイクル（推定→信号→待機→再推定） ---------------- */
+const MORSE_STANDBY=800;   // 信号後の待機ms
+function morseCycle(hBest,vBest){
+  if(!ui.morseOn||!state.aligned) return;
+  const now=performance.now();
+  if(morse.busy||now<state.morseNext) return;   // 信号中・待機中は推定継続のみ
+
+  // 判定1: 危険 — 現在速度で予測時間内にボディスペースがエッジへ接触
+  const halfW=ui.bodyW/2;
+  const v=estSpeed();
+  const reach=Math.max(v*ui.horizon,0.4);
+  let hit=null;
+  for(const b of [hBest,vBest]){
+    if(!b) continue;
+    if(Math.abs(b.lat)<=halfW && b.d<=reach && (!hit||b.d<hit.d)) hit=b;
+  }
+  if(hit && v>0.15){
+    const ms=morse.play("...---...",2);          // SOS ×2
+    state.morseNext=now+ms+MORSE_STANDBY;
+    state.lastMorse="SOS";
+    addRecMorse("SOS",hit);
+    return;
+  }
+  // 判定2: 進行可 — 中央±50cm・前方1m以内にエッジなし
+  const corridorBusy=[hBest,vBest].some(b=>b&&Math.abs(b.lat)<=0.5&&b.d<=1.0);
+  if(!corridorBusy){
+    const ms=morse.play("-.-",2);                // K ×2
+    state.morseNext=now+ms+MORSE_STANDBY;
+    state.lastMorse="K";
+    return;
+  }
+  // どちらでもない（回廊内にエッジはあるが接触予測なし）→ 無信号で待機し再推定
+  state.lastMorse="";
+  state.morseNext=now+MORSE_STANDBY;
+}
+let _lastSOSRec=0;
+function addRecMorse(sig,b){
+  const now=Date.now();
+  if(now-_lastSOSRec<4000) return;   // 記録の氾濫防止
+  _lastSOSRec=now;
+  addRec("morse",`${sig} d=${b.d.toFixed(2)}m lat=${b.lat.toFixed(2)}m v=${estSpeed().toFixed(2)}m/s`);
+}
+
+/* ---------------- CSV ---------------- */
+function csvTick(){
+  if(!ui.csvOn||!state.running||!state.aligned) return;
+  const t=Date.now(), h=state.hazards.h, v=state.hazards.v;
+  state.csv.push([
+    new Date(t).toISOString(), ((t-state.sessionStart)/1000).toFixed(1),
+    h?h.d.toFixed(2):"", h?h.lat.toFixed(2):"", h?h.lz.code:"",
+    v?v.d.toFixed(2):"", v?v.lat.toFixed(2):"", v?v.lz.code:"",
+    state.edgeCount, state.motionOK?state.accelFwd.toFixed(3):"",
+    estSpeed().toFixed(2), ui.pitchOn?"pitch":"int", state.lastMorse,
+    state.model?("v"+state.model.v):"std", curLang
+  ].join(","));
+}
+function saveCsv(){
+  if(!state.csv.length){ return; }
+  const head="timestamp_iso,t_sec,h_edge_dist_m,h_edge_lat_m,h_edge_lat_zone,v_edge_dist_m,v_edge_lat_m,v_edge_lat_zone,edge_count,accel_fwd_ms2,speed_est_ms,speed_method,morse,model,lang";
+  const blob=new Blob(["\uFEFF"+head+"\n"+state.csv.join("\n")],{type:"text/csv"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="okimo_edge_"+new Date().toISOString().replace(/[:.]/g,"-")+".csv";
+  a.click(); URL.revokeObjectURL(a.href);
+}
+$("btnCsv").addEventListener("click",saveCsv);
+
+/* ---------------- カメラ取得（診断つき） ---------------- */
+async function getCam(){
+  if(!window.isSecureContext) throw {code:"insecure"};
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia) throw {code:"nomedia"};
+  try{
+    return await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:"environment"},width:{ideal:640},height:{ideal:480}},audio:false
+    });
+  }catch(e1){
+    // 制約を最小化して再試行（前面カメラのみの端末・厳格な実装への対応）
+    try{ return await navigator.mediaDevices.getUserMedia({video:true,audio:false}); }
+    catch(e2){ throw e2; }
+  }
+}
+function camMsg(e){
+  const U=L().ui, inFrame=(window.self!==window.top);
+  if(e&&e.code==="insecure") return U.diagInsecure;
+  if(e&&e.code==="nomedia") return inFrame?U.diagIframe:U.diagInsecure;
+  switch(e&&e.name){
+    case "NotAllowedError":
+    case "SecurityError": return inFrame?U.diagIframe:U.diagDenied;
+    case "NotFoundError":
+    case "OverconstrainedError": return U.diagNoCam;
+    case "NotReadableError":
+    case "AbortError": return U.diagBusy;
+    default: return U.aCamErr+((e&&(e.message||e.name))||"?");
+  }
+}
+
+/* ---------------- 開始/終了 ---------------- */
+async function start(){
+  if(state.running) return;
+  stopCapture();
+  const U=L().ui, S=L().sp;
+  try{
+    state.stream=await getCam();
+  }catch(e){
+    const msg=camMsg(e);
+    setStatus(U.statusNoCam,true);
+    setCallout("⚠ "+msg);
+    log(msg);
+    return;
+  }
+  video.srcObject=state.stream;
+  try{ await video.play(); }catch(e){ /* muted+playsinlineなら描画は継続するため無視 */ }
+  await enableMotion();
+  await applyRouteModel($("liveRoute").value);
+
+  const w=$("stage").clientWidth;
+  view.width=w; view.height=Math.round(w*PH/PW); hud.width=w; hud.height=view.height;
+
+  state.running=true; state.aligned=false; state.csv=[];
+  state.speed=0; state.morseNext=0; state.lastMorse="";
+  if(ui.morseOn) morse.ensure();   // ユーザー操作内でAudioContextを起動（自動再生制限対策）
+  $("btnStart").disabled=true;
+  const bs=$("btnStop"); bs.disabled=false; bs.classList.add("armed");
+
+  setStatus(U.statusAlign,false);
+  setCallout(S.align);
+  speak(S.align,true);
+  addRec("run","align");
+  const preLoop=()=>{ if(!state.running||state.aligned) return;
+    try{ processFrame(); }catch(e){}
+    state.raf=requestAnimationFrame(preLoop); };
+  preLoop();
+  await new Promise(r=>setTimeout(r,4000));
+  if(!state.running) return;
+  state.aligned=true; cancelAnimationFrame(state.raf);
+
+  state.sessionStart=Date.now();
+  state.csvTimer=setInterval(csvTick,200);
+  setStatus(U.statusRun,false);
+  speak(S.start,true);
+  addRec("run","start"+(state.model?" model v"+state.model.v+" / "+state.curLiveRoute:" std"));
+  const loop=()=>{ if(!state.running) return;
+    try{ processFrame(); }catch(e){ log("err: "+e.message); }
+    state.raf=requestAnimationFrame(loop); };
+  loop();
+}
+function stop(){
+  if(!state.running) return;
+  const U=L().ui, S=L().sp;
+  state.running=false; state.aligned=false;
+  cancelAnimationFrame(state.raf); clearInterval(state.csvTimer);
+  if(state.stream) state.stream.getTracks().forEach(t=>t.stop());
+  $("btnStart").disabled=false;
+  const bs=$("btnStop"); bs.disabled=true; bs.classList.remove("armed");
+  setStatus(U.statusIdle,false); setCallout(U.calloutDone);
+  speak(S.stop,true);
+  addRec("run","stop csv:"+state.csv.length);
+  if(ui.csvOn&&state.csv.length) saveCsv();
+}
+$("btnStart").addEventListener("click",start);
+$("btnStop").addEventListener("click",stop);
+
+/* ---------------- 経路・モデル管理 ---------------- */
+async function loadRoutes(){
+  state.routes=(await store.get("routes"))||[];
+  const sel=$("routeSel"), live=$("liveRoute");
+  sel.innerHTML=""; live.innerHTML=`<option value="">${L().ui.optStandard}</option>`;
+  for(const r of state.routes){
+    sel.insertAdjacentHTML("beforeend",`<option value="${r}">${r}</option>`);
+    live.insertAdjacentHTML("beforeend",`<option value="${r}">${r}</option>`);
+  }
+  if(state.routes.length&&!state.curRoute) state.curRoute=state.routes[0];
+  if(state.curRoute) sel.value=state.curRoute;
+  updateTrainInfo();
+}
+$("routeSel").addEventListener("change",e=>{ state.curRoute=e.target.value; updateTrainInfo(); });
+$("btnRouteAdd").addEventListener("click",async()=>{
+  const n=$("routeNew").value.trim();
+  if(!n) return;
+  if(!state.routes.includes(n)){
+    state.routes.push(n);
+    await store.set("routes",state.routes);
+    await addRec("route","add: "+n);
+  }
+  state.curRoute=n; $("routeNew").value="";
+  await loadRoutes();
+});
+async function updateTrainInfo(){
+  const U=L().ui;
+  if(!state.curRoute){ $("trainInfo").textContent=U.trainSelRoute; return; }
+  const s=(await store.get("samples:"+state.curRoute))||{V:[],H:[]};
+  const m=await store.get("model:"+state.curRoute);
+  $("trainInfo").textContent=U.trainFmt(state.curRoute,s.V.length,s.H.length,m?m.v:null,m?m.trainedAt.slice(0,10):"");
+}
+async function applyRouteModel(route){
+  const U=L().ui;
+  state.model=null; state.curLiveRoute=route||"";
+  const badge=$("modelBadge");
+  if(!route){ badge.style.display="none"; return; }
+  const m=await store.get("model:"+route);
+  if(m){ state.model=m; badge.textContent=U.modelApplied(m.v,route); badge.style.color="var(--ok)"; badge.style.display="block"; }
+  else { badge.textContent=U.modelUntrained; badge.style.color="var(--dim)"; badge.style.display="block"; }
+}
+$("liveRoute").addEventListener("change",e=>applyRouteModel(e.target.value));
+
+/* ---------------- 学習: コマ収集 ---------------- */
+function frameThumb(){ return proc.toDataURL("image/jpeg",0.55); }
+async function grabToProc(src){
+  const vw=src.videoWidth,vh=src.videoHeight;
+  if(!vw) return null;
+  const s=Math.max(PW/vw,PH/vh);
+  pctx.drawImage(src,(PW-s*vw)/2,(PH-s*vh)/2,s*vw,s*vh);
+  return pctx.getImageData(0,0,PW,PH);
+}
+function pushFrame(imgData){
+  state.frames.push({id:Date.now()+"_"+state.frames.length, imgData, thumb:frameThumb(), segs:[], saved:false});
+  renderFrames();
+  selectFrame(state.frames.length-1);
+}
+function renderFrames(){
+  const box=$("frames"); box.innerHTML="";
+  state.frames.forEach((f,i)=>{
+    const d=document.createElement("div");
+    d.className="fr"+(i===state.selFrame?" sel":"")+(f.saved?" done":"");
+    d.innerHTML=`<img src="${f.thumb}">`;
+    d.addEventListener("click",()=>selectFrame(i));
+    box.appendChild(d);
+  });
+}
+async function captureLearnFrame(){
+  if(!state.capturing) return;
+  const im=await grabToProc(video);
+  if(im) pushFrame(im);
+}
+async function startCapture(){
+  const U=L().ui, S=L().sp;
+  if(!state.curRoute){ alert(U.aNeedRoute); return; }
+  stop();
+  try{
+    state.capStream=await getCam();
+  }catch(e){ alert(camMsg(e)); return; }
+  video.srcObject=state.capStream;
+  try{ await video.play(); }catch(e){}
+  state.capturing=true;
+  $("btnCap").textContent=U.btnCapStop;
+  $("btnCap").classList.add("gold");
+  state.capTimer=setInterval(captureLearnFrame,1500);
+  speak(S.capStart,true);
+}
+function stopCapture(){
+  if(!state.capturing) return;
+  state.capturing=false;
+  clearInterval(state.capTimer);
+  if(state.capStream) state.capStream.getTracks().forEach(t=>t.stop());
+  $("btnCap").textContent=L().ui.btnCap;
+  $("btnCap").classList.remove("gold");
+  addRec("learn","capture end: "+state.frames.length+" frames ("+state.curRoute+")");
+}
+$("btnCap").addEventListener("click",()=>{ state.capturing?stopCapture():startCapture(); });
+document.addEventListener("click",e=>{
+  if(state.capturing && e.target.closest("#tab-learn") && !e.target.closest("button,select,input"))
+    captureLearnFrame();
+});
+
+$("btnVid").addEventListener("click",()=>$("vidFile").click());
+$("vidFile").addEventListener("change",async e=>{
+  const U=L().ui, S=L().sp;
+  const file=e.target.files[0]; if(!file) return;
+  if(!state.curRoute){ alert(U.aNeedRoute); return; }
+  const url=URL.createObjectURL(file);
+  vplay.src=url;
+  await new Promise(res=>vplay.addEventListener("loadedmetadata",res,{once:true}));
+  const dur=Math.min(vplay.duration,120), step=Math.max(1,dur/24);
+  for(let t=0.2;t<dur;t+=step){
+    vplay.currentTime=t;
+    await new Promise(res=>vplay.addEventListener("seeked",res,{once:true}));
+    const im=await grabToProc(vplay);
+    if(im) pushFrame(im);
+  }
+  URL.revokeObjectURL(url);
+  addRec("learn","video: "+file.name+" -> "+state.frames.length+" frames");
+  speak(S.vidDone,true);
+});
+
+/* ---------------- 学習: 手描き注釈 ---------------- */
+const annoImg=$("annoImg"), annoDraw=$("annoDraw");
+const aictx=annoImg.getContext("2d"), adctx=annoDraw.getContext("2d");
+function selectFrame(i){
+  state.selFrame=i; renderFrames();
+  const f=state.frames[i]; if(!f) return;
+  const w=$("annoWrap").clientWidth||320, h=Math.round(w*PH/PW);
+  annoImg.width=w; annoImg.height=h; annoDraw.width=w; annoDraw.height=h;
+  pctx.putImageData(f.imgData,0,0);
+  aictx.imageSmoothingEnabled=false;
+  aictx.drawImage(proc,0,0,w,h);
+  state.strokes=f.segs.slice();
+  redrawStrokes();
+}
+function redrawStrokes(){
+  adctx.clearRect(0,0,annoDraw.width,annoDraw.height);
+  const sx=annoDraw.width/PW, sy=annoDraw.height/PH;
+  adctx.lineWidth=5; adctx.lineCap="round";
+  for(const s of state.strokes){
+    adctx.strokeStyle=s.kind==="V"?"#ffd400":"#ff9a3c";
+    adctx.beginPath();
+    adctx.moveTo(s.x0*sx,s.y0*sy); adctx.lineTo(s.x1*sx,s.y1*sy);
+    adctx.stroke();
+  }
+}
+["mAuto","mV","mH"].forEach(id=>$(id).addEventListener("click",()=>{
+  ["mAuto","mV","mH"].forEach(x=>$(x).classList.remove("act"));
+  $(id).classList.add("act");
+  state.drawMode=id==="mAuto"?"auto":(id==="mV"?"V":"H");
+}));
+$("mUndo").addEventListener("click",()=>{ state.strokes.pop(); redrawStrokes(); });
+$("mClear").addEventListener("click",()=>{ state.strokes=[]; redrawStrokes(); });
+
+function evPos(e){
+  const r=annoDraw.getBoundingClientRect();
+  const cx=(e.touches?e.touches[0].clientX:e.clientX)-r.left;
+  const cy=(e.touches?e.touches[0].clientY:e.clientY)-r.top;
+  return {x:cx/r.width*PW, y:cy/r.height*PH};
+}
+function penDown(e){ if(state.selFrame<0) return; e.preventDefault(); state.drawing=evPos(e); }
+function penMove(e){
+  if(!state.drawing) return; e.preventDefault();
+  const p=evPos(e), s=state.drawing;
+  redrawStrokes();
+  const sx=annoDraw.width/PW, sy=annoDraw.height/PH;
+  adctx.strokeStyle="#fff"; adctx.lineWidth=3;
+  adctx.beginPath(); adctx.moveTo(s.x*sx,s.y*sy); adctx.lineTo(p.x*sx,p.y*sy); adctx.stroke();
+}
+function penUp(e){
+  if(!state.drawing) return; e.preventDefault();
+  let end;
+  if(e.changedTouches){
+    const r=annoDraw.getBoundingClientRect();
+    end={x:(e.changedTouches[0].clientX-r.left)/r.width*PW, y:(e.changedTouches[0].clientY-r.top)/r.height*PH};
+  } else end=evPos(e);
+  const s=state.drawing; state.drawing=null;
+  const dx=end.x-s.x, dy=end.y-s.y;
+  if(Math.hypot(dx,dy)<8){ redrawStrokes(); return; }
+  let kind=state.drawMode;
+  if(kind==="auto") kind=Math.abs(dx)>=Math.abs(dy)?"H":"V";
+  let seg;
+  if(kind==="V"){ const x=(s.x+end.x)/2; seg={kind,x0:x,y0:Math.min(s.y,end.y),x1:x,y1:Math.max(s.y,end.y)}; }
+  else { const y=(s.y+end.y)/2; seg={kind,x0:Math.min(s.x,end.x),y0:y,x1:Math.max(s.x,end.x),y1:y}; }
+  state.strokes.push(seg);
+  redrawStrokes();
+}
+annoDraw.addEventListener("pointerdown",penDown);
+annoDraw.addEventListener("pointermove",penMove);
+annoDraw.addEventListener("pointerup",penUp);
+annoDraw.addEventListener("touchstart",penDown,{passive:false});
+annoDraw.addEventListener("touchmove",penMove,{passive:false});
+annoDraw.addEventListener("touchend",penUp,{passive:false});
+
+/* --- 注釈 → 教師サンプル --- */
+function extractSamples(imgData,segs){
+  const tmp=new ImageData(new Uint8ClampedArray(imgData.data),PW,PH);
+  toGray(tmp); sobel();
+  const posV=[],posH=[],neg=[];
+  const near=(x,y)=>{
+    let dmin=1e9;
+    for(const s of segs){
+      if(s.kind==="V"){ if(y>=s.y0-2&&y<=s.y1+2) dmin=Math.min(dmin,Math.abs(x-s.x0)); }
+      else{ if(x>=s.x0-2&&x<=s.x1+2) dmin=Math.min(dmin,Math.abs(y-s.y0)); }
+    }
+    return dmin;
+  };
+  for(const s of segs){
+    if(s.kind==="V"){
+      for(let y=Math.max(1,Math.round(s.y0));y<Math.min(PH-1,Math.round(s.y1));y++){
+        for(let ox=-1;ox<=1;ox++){
+          const x=Math.round(s.x0)+ox;
+          if(x<1||x>=PW-1) continue;
+          posV.push(feat(y*PW+x,y).map(v=>+v.toFixed(4)));
+        }
+      }
+    } else {
+      for(let x=Math.max(1,Math.round(s.x0));x<Math.min(PW-1,Math.round(s.x1));x++){
+        for(let oy=-1;oy<=1;oy++){
+          const y=Math.round(s.y0)+oy;
+          if(y<1||y>=PH-1) continue;
+          posH.push(feat(y*PW+x,y).map(v=>+v.toFixed(4)));
+        }
+      }
+    }
+  }
+  const nNeg=(posV.length+posH.length)*2;
+  let guard=0;
+  while(neg.length<nNeg&&guard<nNeg*20){
+    guard++;
+    const x=1+Math.floor(Math.random()*(PW-2)), y=1+Math.floor(Math.random()*(PH-2));
+    if(near(x,y)<6) continue;
+    neg.push(feat(y*PW+x,y).map(v=>+v.toFixed(4)));
+  }
+  return {posV,posH,neg};
+}
+$("btnAnnoSave").addEventListener("click",async()=>{
+  const U=L().ui, S=L().sp;
+  if(state.selFrame<0||!state.curRoute){ alert(U.aNeedFrameRoute); return; }
+  const f=state.frames[state.selFrame];
+  f.segs=state.strokes.slice(); f.saved=true;
+  const {posV,posH,neg}=extractSamples(f.imgData,f.segs);
+  const key="samples:"+state.curRoute;
+  const s=(await store.get(key))||{V:[],H:[],negV:[],negH:[]};
+  s.V.push(...posV); s.H.push(...posH);
+  s.negV.push(...neg.slice(0,Math.ceil(neg.length/2)));
+  s.negH.push(...neg.slice(Math.ceil(neg.length/2)));
+  const CAP=9000;
+  for(const k of ["V","H","negV","negH"]) if(s[k].length>CAP) s[k]=s[k].slice(-CAP);
+  await store.set(key,s);
+  await addRec("learn",`anno (${state.curRoute}): V${f.segs.filter(x=>x.kind==="V").length} H${f.segs.filter(x=>x.kind==="H").length} -> +V${posV.length} +H${posH.length} neg${neg.length}`);
+  renderFrames(); updateTrainInfo();
+  speak(S.annoSaved,true);
+});
+
+/* --- 学習(LR/SGD) --- */
+function trainLR(pos,neg,epochs){
+  const D=6, w=new Float32Array(D);
+  const data=[];
+  for(const f of pos) data.push({f,y:1});
+  for(const f of neg) data.push({f,y:0});
+  if(data.length<40) return null;
+  let loss=0;
+  for(let e=0;e<epochs;e++){
+    for(let i=data.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [data[i],data[j]]=[data[j],data[i]]; }
+    const lr=0.6/(1+e*0.15);
+    loss=0;
+    for(const d of data){
+      const p=sig(dot(w,d.f)), g=p-d.y;
+      for(let k=0;k<D;k++) w[k]-=lr*(g*d.f[k]+1e-4*w[k]);
+      loss+=-(d.y*Math.log(p+1e-9)+(1-d.y)*Math.log(1-p+1e-9));
+    }
+    loss/=data.length;
+  }
+  let correct=0;
+  for(const d of data) if((sig(dot(w,d.f))>0.5?1:0)===d.y) correct++;
+  return {w:Array.from(w,v=>+v.toFixed(5)), loss:+loss.toFixed(4), acc:+(correct/data.length).toFixed(3), n:data.length};
+}
+$("btnTrain").addEventListener("click",async()=>{
+  const U=L().ui, S=L().sp;
+  if(!state.curRoute){ alert(U.trainSelRoute); return; }
+  const s=await store.get("samples:"+state.curRoute);
+  if(!s||(s.V.length+s.H.length)<60){ alert(U.aNeedData); return; }
+  $("btnTrain").textContent=U.btnTraining; $("btnTrain").disabled=true;
+  await new Promise(r=>setTimeout(r,50));
+  const rV=trainLR(s.V,s.negV,30), rH=trainLR(s.H,s.negH,30);
+  const prev=await store.get("model:"+state.curRoute);
+  const model={
+    v:(prev?prev.v:0)+1,
+    wV:rV?rV.w:(prev?prev.wV:null),
+    wH:rH?rH.w:(prev?prev.wH:null),
+    trainedAt:new Date().toISOString(),
+    stats:{V:rV,H:rH},
+    history:[...(prev?prev.history:[]),{v:(prev?prev.v:0)+1,t:new Date().toISOString(),
+      nV:s.V.length,nH:s.H.length,lossV:rV?rV.loss:null,lossH:rH?rH.loss:null,accV:rV?rV.acc:null,accH:rH?rH.acc:null}].slice(-30)
+  };
+  if(!model.wV||!model.wH){ alert(U.aNeedBoth); }
+  else{
+    await store.set("model:"+state.curRoute,model);
+    await addRec("learn",`model v${model.v} (${state.curRoute}): V acc${rV.acc} loss${rV.loss} / H acc${rH.acc} loss${rH.loss}`);
+    speak(S.trained(model.v),true);
+    if($("liveRoute").value===state.curRoute) applyRouteModel(state.curRoute);
+  }
+  $("btnTrain").textContent=U.btnTrain; $("btnTrain").disabled=false;
+  updateTrainInfo();
+});
+
+/* ---------------- 記録 ---------------- */
+$("btnExport").addEventListener("click",async()=>{
+  const dump={exportedAt:new Date().toISOString(),routes:state.routes,log:state.recLog,samples:{},models:{}};
+  for(const r of state.routes){
+    dump.samples[r]=await store.get("samples:"+r);
+    dump.models[r]=await store.get("model:"+r);
+  }
+  const blob=new Blob([JSON.stringify(dump)],{type:"application/json"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="okimo_learn_"+new Date().toISOString().slice(0,10)+".json";
+  a.click(); URL.revokeObjectURL(a.href);
+  addRec("rec","export");
+});
+$("btnImport").addEventListener("click",()=>$("jsonFile").click());
+$("jsonFile").addEventListener("change",async e=>{
+  const U=L().ui;
+  const file=e.target.files[0]; if(!file) return;
+  try{
+    const dump=JSON.parse(await file.text());
+    for(const r of (dump.routes||[])){
+      if(!state.routes.includes(r)) state.routes.push(r);
+      if(dump.samples&&dump.samples[r]) await store.set("samples:"+r,dump.samples[r]);
+      if(dump.models&&dump.models[r]) await store.set("model:"+r,dump.models[r]);
+    }
+    await store.set("routes",state.routes);
+    if(dump.log){ state.recLog=[...dump.log,...state.recLog].slice(0,400); await store.set("log",state.recLog); }
+    await loadRoutes(); renderRec();
+    await addRec("rec","import: "+file.name);
+    alert(U.aImported);
+  }catch(err){ alert(U.aImportFail+err.message); }
+});
+$("btnWipe").addEventListener("click",async()=>{
+  if(!confirm(L().ui.aWipe)) return;
+  for(const r of state.routes){ await store.del("samples:"+r); await store.del("model:"+r); }
+  await store.del("routes"); await store.del("log");
+  state.routes=[]; state.recLog=[]; state.frames=[]; state.model=null; state.curRoute="";
+  renderFrames(); renderRec(); loadRoutes();
+});
+
+/* ---------------- 初期化 ---------------- */
+window.addEventListener("load",async()=>{
+  const w=$("stage").clientWidth||360;
+  view.width=w; view.height=Math.round(w*PH/PW); hud.width=w; hud.height=view.height;
+  vctx.fillStyle="#000"; vctx.fillRect(0,0,view.width,view.height);
+  hctx.strokeStyle="#ffd400"; hctx.lineWidth=4;
+  hctx.strokeRect(w*0.2,view.height*0.3,w*0.6,view.height*0.4);
+  const savedLang=await store.get("lang");
+  if(savedLang&&LANGS[savedLang]) curLang=savedLang;
+  buildLangSel();
+  state.recLog=(await store.get("log"))||[];
+  const savedRate=await store.get("ttsRate");
+  if(savedRate){ $("ttsRate").value=Math.round(savedRate*100); $("ttsRateV").textContent=savedRate.toFixed(2)+"×"; }
+  await loadRoutes();
+  applyLang();
+  /* 起動時の環境チェック: カメラが使えない環境なら先に警告を表示 */
+  if(!window.isSecureContext){
+    setStatus(L().ui.statusNoCam,true); setCallout("⚠ "+L().ui.diagInsecure);
+  } else if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    setStatus(L().ui.statusNoCam,true);
+    setCallout("⚠ "+((window.self!==window.top)?L().ui.diagIframe:L().ui.diagInsecure));
+  }
+});
+</script>
+</body>
+</html>
