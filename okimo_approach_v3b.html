@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#101418">
+<title>OKIMO 人接近モールス警告 v3+B（骨伝導振動）</title>
+<style>
+  :root{
+    --bg:#101418; --panel:#1a2028; --line:#2c3642; --fg:#e8edf2; --dim:#8a97a6;
+    --c:#f5c542; --l:#5ec8ff; --r:#ff7a6b; --ok:#6fdc8c; --warn:#ff5c5c;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,"Hiragino Sans","Noto Sans JP",system-ui,sans-serif;-webkit-text-size-adjust:100%}
+  body{padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+  #stage{position:relative;width:100%;aspect-ratio:4/3;background:#000;overflow:hidden}
+  #video,#overlay{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  #hud{position:absolute;left:0;right:0;top:0;padding:8px 10px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;text-shadow:0 1px 3px #000}
+  #status{font-size:26px;font-weight:700;line-height:1.15}
+  #status.c{color:var(--c)} #status.l{color:var(--l)} #status.r{color:var(--r)}
+  #metrics{font-size:12px;color:#d9e1ea;text-align:right;line-height:1.4;white-space:pre}
+  #session{position:absolute;left:10px;bottom:8px;font-size:13px;text-shadow:0 1px 3px #000}
+  #session b{color:var(--ok)}
+  #zonebar{display:flex;height:6px}
+  #zonebar div{flex:1;background:var(--line);transition:background .15s}
+  #zonebar .on.L{background:var(--l)} #zonebar .on.C{background:var(--c)} #zonebar .on.R{background:var(--r)}
+  #controls{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:10px}
+  button{font:inherit;font-size:15px;padding:12px 6px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--fg)}
+  button:active{background:#242d38}
+  button.primary{background:#1d4d33;border-color:#2c7a4b;font-weight:700}
+  button.primary.running{background:#5a1f1f;border-color:#a33}
+  button:focus-visible{outline:2px solid var(--l)}
+  #msg{padding:0 10px 6px;font-size:13px;color:var(--dim);min-height:1.4em}
+  details{margin:0 10px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+  summary{padding:10px 12px;cursor:pointer;font-weight:600}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;padding:0 12px 12px}
+  .grid label{font-size:12px;color:var(--dim);display:flex;flex-direction:column;gap:3px}
+  .grid input[type=number],.grid input[type=text],.grid select{font:inherit;font-size:15px;padding:7px 8px;border-radius:7px;border:1px solid var(--line);background:#0d1115;color:var(--fg);width:100%}
+  .grid .wide{grid-column:1/-1}
+  .grid .chk{flex-direction:row;align-items:center;gap:8px;font-size:14px;color:var(--fg)}
+  .row{display:flex;gap:8px;padding:0 12px 12px;flex-wrap:wrap}
+  .row button{flex:1;padding:9px 4px;font-size:14px}
+  #log{margin:0 10px 14px;font-size:12px;color:#c3ccd6;line-height:1.5;max-height:160px;overflow:auto;border-top:1px solid var(--line);padding-top:6px}
+  #log .ev{color:var(--fg)}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+  <div id="hud">
+    <div id="status">待機中</div>
+    <div id="metrics"></div>
+  </div>
+  <div id="session">セッション <b>—</b></div>
+</div>
+<div id="zonebar"><div class="L"></div><div class="C"></div><div class="R"></div></div>
+
+<div id="controls">
+  <button id="btnStart" class="primary">開始</button>
+  <button id="btnCal">3 mで校正</button>
+  <button id="btnCsv">CSVを保存</button>
+</div>
+<div id="msg">「開始」でカメラ・音声・モデルを起動します。</div>
+
+<details id="settings">
+  <summary>設定（モールス・距離・音声）</summary>
+  <div class="grid">
+    <label>短点 (ms)<input type="number" id="s_dot" step="10" min="20"></label>
+    <label>長点＝短点×<input type="number" id="s_dashRatio" step="0.5" min="1"></label>
+    <label>符号間隔 3 m時（短点単位）<input type="number" id="s_gapFar" step="1" min="1"></label>
+    <label>符号間隔 2 m時（短点単位）<input type="number" id="s_gapNear" step="1" min="1"></label>
+    <label>1回の繰り返し数<input type="number" id="s_repeats" step="1" min="1"></label>
+    <label>音の高さ (Hz)<input type="number" id="s_toneHz" step="50" min="80"></label>
+    <label>出力<select id="s_outMode"><option value="tone">音（トーン）</option><option value="buzz">振動（低周波バズ）</option><option value="both">音＋振動</option></select></label>
+    <label>振動の周波数 (Hz)<input type="number" id="s_buzzHz" step="10" min="40" max="300"></label>
+    <label>振動のうねり (Hz, 0=なし)<input type="number" id="s_buzzMod" step="5" min="0" max="100"></label>
+    <label>音色<select id="s_wave"><option value="sine">sine（柔らかい）</option><option value="triangle">triangle（標準）</option><option value="square">square（硬い・最も明瞭）</option></select></label>
+    <label>警告開始距離 (m)<input type="number" id="s_farM" step="0.1"></label>
+    <label>最接近距離 (m)<input type="number" id="s_nearM" step="0.1"></label>
+    <label>接近判定速度 (m/s)<input type="number" id="s_approachV" step="0.05"></label>
+    <label>接近判定 t値<input type="number" id="s_tThresh" step="0.5"></label>
+    <label>静止判定 (秒)<input type="number" id="s_staticSec" step="0.5"></label>
+    <label>回帰窓 (秒)<input type="number" id="s_windowSec" step="0.1"></label>
+    <label>標準肩幅 (mm)<input type="number" id="s_shoulderMm" step="5"></label>
+    <label>標準瞳孔間距離 (mm)<input type="number" id="s_ipdMm" step="1"></label>
+    <label>焦点距離 (px, 0=自動)<input type="number" id="s_focalPx" step="1"></label>
+    <label>校正距離 (m)<input type="number" id="s_calibM" step="0.1"></label>
+    <label>セッション長 (秒)<input type="number" id="s_sessionSec" step="5"></label>
+    <label>音声の再通知間隔 (秒)<input type="number" id="s_cooldownSec" step="0.5"></label>
+    <label>正面の符号<input type="text" id="s_letterC" maxlength="1"></label>
+    <label>左／右の符号<input type="text" id="s_letterLR" maxlength="3" placeholder="LR"></label>
+    <label class="chk"><input type="checkbox" id="s_speech">音声を出す</label>
+    <label class="chk"><input type="checkbox" id="s_pan">左右のイヤホンに振り分ける（左＝左耳、右＝右耳、正面＝両耳）</label>
+    <label class="chk"><input type="checkbox" id="s_vibrate">本体バイブも使う (Android)</label>
+    <label class="wide">Pico 2 W のURL（例 https://192.168.1.50）<input type="url" id="s_picoUrl" placeholder="https://192.168.1.50" autocapitalize="off"></label>
+    <label class="chk"><input type="checkbox" id="s_pico">電気刺激スイッチ（Pico 2 W）に送る</label>
+    <label class="chk"><input type="checkbox" id="s_keepAlive">Bluetoothを起こしておく（無音時の頭切れ対策）</label>
+    <label class="chk"><input type="checkbox" id="s_mirror">画面を左右反転（前面カメラ用）</label>
+    <label class="chk"><input type="checkbox" id="s_front">前面カメラを使う</label>
+  </div>
+  <div class="row">
+    <button id="tK">試聴 K</button><button id="tL">試聴 L</button><button id="tR">試聴 R</button><button id="tV">音声試験</button><button id="tP">Pico接続テスト</button><button id="sReset">初期値に戻す</button>
+  </div>
+</details>
+
+<div id="log"></div>
+
+<script type="module">
+import { FilesetResolver, PoseLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+
+/* ===================== 設定 ===================== */
+const DEF = {
+  dot:120, dashRatio:3, gapFar:7, gapNear:1, repeats:3, toneHz:700, wave:'triangle', keepAlive:true, outMode:'both', buzzHz:120, buzzMod:30, pan:true, picoUrl:'', pico:false,
+  farM:3.0, nearM:2.0, approachV:0.25, tThresh:2.0, staticSec:2.0, windowSec:1.0,
+  shoulderMm:400, ipdMm:63, focalPx:0, calibM:3.0,
+  sessionSec:30, cooldownSec:3,
+  letterC:'K', letterLR:'LR',
+  speech:true, vibrate:true, mirror:false, front:false,
+};
+const TEXT = {
+  approach:{C:'正面人接近', L:'左人接近', R:'右人接近'},
+  static:  {C:'正面人静止中', L:'左人静止中', R:'右人静止中'},
+};
+const MORSE = {A:'.-',B:'-...',C:'-.-.',D:'-..',E:'.',F:'..-.',G:'--.',H:'....',I:'..',J:'.---',K:'-.-',L:'.-..',M:'--',N:'-.',O:'---',P:'.--.',Q:'--.-',R:'.-.',S:'...',T:'-',U:'..-',V:'...-',W:'.--',X:'-..-',Y:'-.--',Z:'--..'};
+
+let S = {...DEF};
+try{ const saved = JSON.parse(localStorage.getItem('okimo_v3b')||'{}'); S = {...DEF, ...saved}; }catch(e){}
+function saveS(){ try{ localStorage.setItem('okimo_v3b', JSON.stringify(S)); }catch(e){} }
+function bindSettings(){
+  for(const k of Object.keys(DEF)){
+    const el = document.getElementById('s_'+k); if(!el) continue;
+    if(el.type==='checkbox') el.checked = !!S[k]; else el.value = S[k];
+    el.oninput = ()=>{ S[k] = el.type==='checkbox' ? el.checked : el.type==='number' ? parseFloat(el.value) : (el.tagName==='SELECT'||el.type==='url') ? el.value : el.value.toUpperCase();
+      if(k==='keepAlive' && ka) ka.gain.setValueAtTime(S.keepAlive?0.02:0, actx.currentTime); saveS(); };
+  }
+}
+bindSettings();
+document.getElementById('tP').onclick=async()=>{
+  if(!S.picoUrl){ setMsg('PicoのURLを入力してください。'); return; }
+  const u=S.picoUrl.replace(/\/+$/,'');
+  try{ const r=await fetch(u+'/ping',{mode:'cors',cache:'no-store'}); const t=await r.text(); setMsg('Pico応答: '+t.trim()+' → 300 msの試験通電を送ります'); fetch(u+'/morse?seq=300,100',{mode:'cors'}); }
+  catch(e){ setMsg('Picoに接続できません。まず '+u+'/ をブラウザで開いて証明書を承認し、同じWi-Fiにいるか確認してください。'); }
+};
+document.getElementById('sReset').onclick = ()=>{ S={...DEF}; saveS(); bindSettings(); };
+const letterFor = z => z==='C' ? (S.letterC||'K') : z==='L' ? (S.letterLR[0]||'L') : (S.letterLR[1]||'R');
+
+/* ===================== 音・振動・音声 ===================== */
+let actx=null,gain=null,osc=null,ka=null,panner=null,gainB=null,bosc=null,lfo=null,lfoGain=null;
+function initAudio(){
+  if(actx) return;
+  if(navigator.audioSession){ try{ navigator.audioSession.type='playback'; }catch(e){} }
+  actx=new (window.AudioContext||window.webkitAudioContext)();
+  panner = actx.createStereoPanner ? actx.createStereoPanner() : null;
+  const sink = panner || actx.destination; if(panner) panner.connect(actx.destination);
+  // トーン系
+  gain=actx.createGain(); gain.gain.value=0; gain.connect(sink);
+  osc=actx.createOscillator(); osc.type=S.wave; osc.frequency.value=S.toneHz; osc.connect(gain); osc.start();
+  // 振動系：低周波の矩形波（骨伝導では「ブルブル」として体感される）に、うねり(AM)を掛けて触感を粗くする
+  gainB=actx.createGain(); gainB.gain.value=0; gainB.connect(sink);
+  lfoGain=actx.createGain(); lfoGain.gain.value=0.5; lfoGain.connect(gainB);
+  bosc=actx.createOscillator(); bosc.type='square'; bosc.frequency.value=S.buzzHz; bosc.connect(lfoGain); bosc.start();
+  lfo=actx.createOscillator(); lfo.type='sine'; lfo.frequency.value=S.buzzMod||0.001;
+  const depth=actx.createGain(); depth.gain.value=0.5; lfo.connect(depth); depth.connect(lfoGain.gain); lfo.start();
+  ka=actx.createGain(); ka.gain.value=S.keepAlive?0.02:0; ka.connect(actx.destination);
+  const ko=actx.createOscillator(); ko.type='sine'; ko.frequency.value=40; ko.connect(ka); ko.start();
+}
+function beep(ms=80,hz=1200){ if(!actx) return; const t=actx.currentTime; osc.frequency.setValueAtTime(hz,t); gain.gain.setValueAtTime(0.6,t); gain.gain.setValueAtTime(0,t+ms/1000); osc.frequency.setValueAtTime(S.toneHz,t+ms/1000+0.01); }
+
+/* 符号列 → [on,off,on,off,...] ms（人数版 morseDigits と同じ組み立て）
+   短点=dot, 長点=dot×dashRatio, 点間=dot, 文字を repeats 回、文字間=gapUnits×dot（接近で短縮） */
+function pattern(letter, gapUnits){
+  const u=S.dot, seq=[], code=MORSE[letter]||MORSE.K;
+  for(let r=0;r<S.repeats;r++){
+    for(let i=0;i<code.length;i++){ seq.push(code[i]==='.'?u:u*S.dashRatio); seq.push(i<code.length-1?u:gapUnits*u); }
+  }
+  return seq;
+}
+/* Pico 2 W（フォトMOSリレーで低周波電極回路を開閉）へ同じ on/off 列を送る */
+let picoErr=0;
+function sendPico(path){
+  if(!S.pico||!S.picoUrl) return;
+  const u=S.picoUrl.replace(/\/+$/,'')+path;
+  fetch(u,{mode:'cors',cache:'no-store',keepalive:true}).then(()=>{ picoErr=0; }).catch(()=>{ if(++picoErr<=3) setMsg('Picoに送れません: '+u+'（同じWi-Fiか、Chromeのフラグ設定を確認）'); });
+}
+/* Pico の反射層（レーザーToF）の状態を毎 0.5 秒読み、CSV と画面に残す */
+const picoState={mm:null,reflex:0,ok:false};
+async function pollPico(){
+  if(!S.pico||!S.picoUrl||!running) return;
+  try{ const j=await (await fetch(S.picoUrl.replace(/\/+$/,'')+'/sensors',{mode:'cors',cache:'no-store'})).json();
+    if(j.reflex!==picoState.reflex) logEvent(j.reflex?`Pico反射ON ${j.mm}mm`:'Pico反射OFF',{event:j.reflex?'pico_reflex_on':'pico_reflex_off'});
+    picoState.mm=j.mm; picoState.reflex=j.reflex; picoState.ok=true;
+  }catch(e){ picoState.ok=false; }
+}
+setInterval(pollPico,500);
+function playPattern(seq, pan=0){ // 返り値: 総時間 ms。pan: -1=左耳, 0=両耳, +1=右耳
+  sendPico('/morse?seq='+seq.map(v=>Math.round(v)).join(','));
+  if(!actx) return seq.reduce((a,b)=>a+b,0);
+  const now=actx.currentTime;
+  if(panner) panner.pan.setValueAtTime(S.pan?pan:0, now);
+  osc.type=S.wave; osc.frequency.setValueAtTime(S.toneHz,now);
+  bosc.frequency.setValueAtTime(S.buzzHz,now); lfo.frequency.setValueAtTime(S.buzzMod||0.001,now);
+  const useT = S.outMode!=='buzz', useB = S.outMode!=='tone';
+  for(const g of [gain,gainB]){ g.gain.cancelScheduledValues(now); g.gain.setValueAtTime(0,now); }
+  let t=now+0.05,total=0; const volT=S.wave==='square'?0.5:0.9, volB=0.8;
+  const env=(g,vol,t,on)=>{ const r=Math.min(0.006,on/4); g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(vol,t+r); g.gain.setValueAtTime(vol,t+on-r); g.gain.linearRampToValueAtTime(0,t+on); };
+  for(let i=0;i<seq.length;i+=2){
+    const on=seq[i]/1000;
+    if(useT) env(gain,volT,t,on);
+    if(useB) env(gainB,volB,t,on);
+    t+=on+seq[i+1]/1000; total+=seq[i]+seq[i+1];
+  }
+  if(S.vibrate&&navigator.vibrate){ try{ navigator.vibrate(seq); }catch(e){} }
+  return total;
+}
+function speak(text){
+  if(!S.speech || !('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(text); u.lang='ja-JP'; u.rate=1.1;
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
+}
+
+/* モールス連続再生ループ：接近中のみ回る。間隔は毎回、現在距離から再計算 */
+let morse = {running:false, letter:null, timer:null};
+function gapUnitsFor(d){
+  const k = Math.min(1, Math.max(0, (S.farM - d)/(S.farM - S.nearM)));
+  return Math.max(1, Math.round(S.gapFar + (S.gapNear - S.gapFar)*k));
+}
+function morseStart(letter){ morse.letter = letter; if(morse.running) return; morse.running = true; morseTick(); }
+function morseTick(){
+  if(!morse.running) return;
+  const g = gapUnitsFor(cur.d ?? S.farM);
+  const seq = pattern(morse.letter, g);
+  const ms = playPattern(seq, cur.zone==='L'?-1:cur.zone==='R'?1:0);
+  logEvent(`morse ${morse.letter} gap=${g}u`, {morse:morse.letter, gap:g});
+  morse.timer = setTimeout(morseTick, ms);
+}
+function morseStop(){ if(morse.running) sendPico('/stop'); morse.running=false; morse.letter=null; clearTimeout(morse.timer); if(actx) for(const g of [gain,gainB]){ g.gain.cancelScheduledValues(actx.currentTime); g.gain.setValueAtTime(0,actx.currentTime); } if(navigator.vibrate) navigator.vibrate(0); }
+
+/* ===================== 記録（CSV） ===================== */
+let rows=[], session=null, sessionSeq=0;
+const CSV_HEAD = ['session_id','timestamp','t_session_s','detected','zone','x_center','eye_px','shoulder_px','distance_m','velocity_mps','t_value','state','gap_units','event','morse','dot_ms','dash_ms','pico_mm','pico_reflex'];
+function iso(){ const d=new Date(), p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3,'0')}`; }
+function addRow(extra={}){
+  if(!session) return;
+  rows.push({
+    session_id:session.id, timestamp:iso(), t_session_s:((performance.now()-session.t0)/1000).toFixed(3),
+    detected:cur.detected?1:0, zone:cur.zone||'', x_center:cur.cx!=null?cur.cx.toFixed(3):'',
+    eye_px:cur.eyePx?cur.eyePx.toFixed(1):'', shoulder_px:cur.shPx?cur.shPx.toFixed(1):'',
+    distance_m:cur.d!=null?cur.d.toFixed(2):'', velocity_mps:cur.v!=null?cur.v.toFixed(2):'', t_value:cur.tv!=null?cur.tv.toFixed(2):'',
+    state:cur.state, gap_units:cur.d!=null?gapUnitsFor(cur.d):'', event:extra.event||'', morse:extra.morse||'',
+    dot_ms:S.dot, dash_ms:S.dot*S.dashRatio, pico_mm:picoState.mm??'', pico_reflex:picoState.ok?picoState.reflex:'',
+  });
+}
+function logEvent(text, extra={}){
+  addRow({event: extra.event ?? text, morse: extra.morse});
+  const el=document.getElementById('log'); const div=document.createElement('div'); div.className='ev'; div.textContent = `${iso().slice(11,23)}  ${text}`; el.prepend(div);
+  while(el.children.length>40) el.lastChild.remove();
+}
+function sessionStart(){
+  sessionSeq++; const id = iso().replace(/[-:T.]/g,'').slice(0,15)+'_'+String(sessionSeq).padStart(2,'0');
+  session = {id, t0:performance.now()};
+  logEvent(`session start ${id}`, {event:'session_start'});
+}
+function sessionEnd(){ logEvent('session end', {event:'session_end'}); session=null; beep(80,1200); setTimeout(()=>beep(80,1200),140); }
+function csvText(){
+  const esc = v => { v=String(v??''); return /[",\n]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; };
+  return '\uFEFF' + CSV_HEAD.join(',') + '\n' + rows.map(r=>CSV_HEAD.map(h=>esc(r[h])).join(',')).join('\n');
+}
+async function exportCsv(){
+  if(!rows.length){ setMsg('記録がまだありません。'); return; }
+  const name = 'okimo_'+iso().replace(/[-:T]/g,'').slice(0,15)+'.csv';
+  const blob = new Blob([csvText()], {type:'text/csv;charset=utf-8'});
+  const file = new File([blob], name, {type:'text/csv'});
+  if(navigator.canShare && navigator.canShare({files:[file]})){
+    try{ await navigator.share({files:[file], title:name}); setMsg(`共有しました: ${name}（${rows.length}行）`); return; }catch(e){ if(e.name==='AbortError') return; }
+  }
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); a.remove();
+  setMsg(`保存しました: ${name}（${rows.length}行）`);
+}
+
+/* ===================== 検出・距離・接近判定 ===================== */
+const video=document.getElementById('video'), canvas=document.getElementById('overlay'), ctx=canvas.getContext('2d');
+let landmarker=null, stream=null, running=false, wakeLock=null;
+const cur = {detected:false, zone:null, cx:null, eyePx:null, shPx:null, d:null, v:null, tv:null, state:'none', lastSeen:0};
+let hist=[], lastSpoken={key:null,t:0}, staticSince=null, prevZone=null, prevState='none', calibBuf=[];
+
+/* 検出器の差し替え点：video から {le,re,ls,rs}（各 {x,y,vis}、xyは0–1正規化）を返せばよい */
+function detectPerson(ts){
+  const res = landmarker.detectForVideo(video, ts);
+  const lm = res.landmarks && res.landmarks[0]; if(!lm) return null;
+  const P = i => ({x:lm[i].x, y:lm[i].y, vis: lm[i].visibility ?? 1});
+  return {le:P(2), re:P(5), ls:P(11), rs:P(12), nose:P(0)};
+}
+function measure(p, W, H){
+  const px = (a,b)=>Math.hypot((a.x-b.x)*W, (a.y-b.y)*H);
+  const eyeOk = p.le.vis>0.5 && p.re.vis>0.5, shOk = p.ls.vis>0.5 && p.rs.vis>0.5;
+  const eyePx = eyeOk ? px(p.le,p.re) : null, shPx = shOk ? px(p.ls,p.rs) : null;
+  const focal = S.focalPx>0 ? S.focalPx : 0.78*W;            // 自動：水平画角≈65°相当
+  let d=null;
+  if(shPx && shPx>4) d = focal*S.shoulderMm/1000/shPx;      // 肩幅優先（3 mで十分な画素数）
+  else if(eyePx && eyePx>3) d = focal*S.ipdMm/1000/eyePx;   // 目間距離は近距離の補助
+  const cx = shOk ? (p.ls.x+p.rs.x)/2 : (eyeOk ? (p.le.x+p.re.x)/2 : p.nose.x);
+  return {eyePx, shPx, d, cx};
+}
+/* 直近 windowSec 秒の距離の回帰勾配（m/s）とその t 値 */
+function regress(){
+  const n=hist.length; if(n<4) return {v:null,tv:null};
+  const t0=hist[0].t; let sx=0,sy=0,sxx=0,sxy=0;
+  for(const h of hist){ const x=h.t-t0; sx+=x; sy+=h.d; sxx+=x*x; sxy+=x*h.d; }
+  const den = n*sxx-sx*sx; if(den<=0) return {v:null,tv:null};
+  const b=(n*sxy-sx*sy)/den, a=(sy-b*sx)/n;
+  let sse=0; for(const h of hist){ const e=h.d-(a+b*(h.t-t0)); sse+=e*e; }
+  const se = Math.sqrt(sse/(n-2)) / Math.sqrt(sxx - sx*sx/n);
+  return {v:b, tv: se>0 ? b/se : (b<0?-99:99)};
+}
+function setStatus(text, zone){ const el=document.getElementById('status'); el.textContent=text; el.className = zone ? zone.toLowerCase() : ''; document.querySelectorAll('#zonebar div').forEach(z=>z.classList.toggle('on', z.classList.contains(zone||''))); }
+function setMsg(t){ document.getElementById('msg').textContent=t; }
+
+function step(now){
+  if(!running) return;
+  const tsec = now/1000;
+  if(video.readyState>=2){
+    const W=canvas.width=video.videoWidth, H=canvas.height=video.videoHeight;
+    let p=null; try{ p = detectPerson(now); }catch(e){}
+    ctx.clearRect(0,0,W,H);
+    ctx.strokeStyle='rgba(255,255,255,.35)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(W/3,0); ctx.lineTo(W/3,H); ctx.moveTo(2*W/3,0); ctx.lineTo(2*W/3,H); ctx.stroke();
+    if(p){
+      const m = measure(p,W,H);
+      cur.detected=true; cur.lastSeen=tsec; Object.assign(cur, m);
+      const cxDisp = S.mirror ? 1-m.cx : m.cx;
+      cur.zone = cxDisp<1/3 ? 'L' : cxDisp>2/3 ? 'R' : 'C';
+      if(m.d!=null){ hist.push({t:tsec,d:m.d}); while(hist.length && tsec-hist[0].t > S.windowSec) hist.shift(); }
+      if(m.shPx){ calibBuf.push(m.shPx); if(calibBuf.length>15) calibBuf.shift(); }
+      // 描画
+      const dot=(q,c)=>{ ctx.fillStyle=c; ctx.beginPath(); ctx.arc(q.x*W,q.y*H,6,0,7); ctx.fill(); };
+      ctx.strokeStyle='#6fdc8c'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(p.ls.x*W,p.ls.y*H); ctx.lineTo(p.rs.x*W,p.rs.y*H); ctx.stroke();
+      dot(p.ls,'#6fdc8c'); dot(p.rs,'#6fdc8c'); dot(p.le,'#5ec8ff'); dot(p.re,'#5ec8ff');
+      if(!session) sessionStart();
+    } else {
+      if(tsec-cur.lastSeen > 0.7){ cur.detected=false; cur.zone=null; cur.d=cur.v=cur.tv=null; cur.eyePx=cur.shPx=null; hist=[]; }
+    }
+    if(S.mirror){ canvas.style.transform='scaleX(-1)'; video.style.transform='scaleX(-1)'; } else { canvas.style.transform=''; video.style.transform=''; }
+  }
+
+  /* 状態判定 */
+  const r = regress(); cur.v=r.v; cur.tv=r.tv;
+  let state='none';
+  if(cur.detected && cur.d!=null && cur.d<=S.farM){
+    const approaching = r.v!=null && r.v < -S.approachV && r.tv < -S.tThresh;
+    if(approaching){ state='approach'; staticSince=null; }
+    else { if(staticSince==null) staticSince=tsec; state = (tsec-staticSince>=S.staticSec) ? 'static' : 'watch'; }
+  } else { staticSince=null; }
+  cur.state=state;
+
+  if(state==='approach'){
+    morseStart(letterFor(cur.zone));
+    const key='approach'+cur.zone;
+    if(key!==lastSpoken.key || tsec-lastSpoken.t > S.cooldownSec){ speak(TEXT.approach[cur.zone]); lastSpoken={key,t:tsec}; logEvent(TEXT.approach[cur.zone], {event:'speech:'+TEXT.approach[cur.zone]}); }
+    setStatus(`${TEXT.approach[cur.zone]}  ${cur.d.toFixed(1)} m`, cur.zone);
+  } else {
+    morseStop();
+    if(state==='static'){
+      const key='static'+cur.zone;
+      if(key!==lastSpoken.key || tsec-lastSpoken.t > S.cooldownSec){ speak(TEXT.static[cur.zone]); lastSpoken={key,t:tsec}; logEvent(TEXT.static[cur.zone], {event:'speech:'+TEXT.static[cur.zone]}); }
+      setStatus(`${TEXT.static[cur.zone]}  ${cur.d.toFixed(1)} m`, cur.zone);
+    } else if(state==='watch'){ setStatus(`監視中  ${cur.d.toFixed(1)} m`, cur.zone); }
+    else if(cur.detected){ setStatus(cur.d!=null ? `遠方 ${cur.d.toFixed(1)} m` : '検出（距離不明）', cur.zone); }
+    else setStatus('人なし', null);
+  }
+  prevState=state; prevZone=cur.zone;
+
+  document.getElementById('metrics').textContent =
+    `肩 ${cur.shPx?cur.shPx.toFixed(0):'–'}px  目 ${cur.eyePx?cur.eyePx.toFixed(0):'–'}px\n速度 ${cur.v!=null?cur.v.toFixed(2):'–'} m/s  t ${cur.tv!=null?cur.tv.toFixed(1):'–'}\n間隔 ${cur.d!=null?gapUnitsFor(cur.d)+'u':'–'}  短点 ${S.dot}ms` + (S.pico?`\nPico ${picoState.ok?(picoState.mm!=null?picoState.mm+'mm':'–'):'未接続'}${picoState.reflex?' 反射中':''}`:'');
+
+  /* セッション記録 */
+  if(session){
+    addRow();
+    const el=(performance.now()-session.t0)/1000;
+    document.querySelector('#session b').textContent = `${session.id.slice(-2)}  ${el.toFixed(1)} / ${S.sessionSec} s`;
+    if(el>=S.sessionSec) sessionEnd();
+  } else document.querySelector('#session b').textContent='—';
+
+  requestAnimationFrame(step);
+}
+
+/* ===================== 起動・停止 ===================== */
+async function start(){
+  const btn=document.getElementById('btnStart');
+  if(running){ stop(); return; }
+  try{
+    initAudio(); await actx.resume(); speak('開始');           // iOSの音声ロック解除はユーザー操作内で
+    setMsg('モデルを読み込み中…');
+    if(!landmarker){
+      const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
+      const opts = d => ({baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task", delegate:d}, runningMode:"VIDEO", numPoses:1, minPoseDetectionConfidence:0.5, minTrackingConfidence:0.5});
+      try{ landmarker = await PoseLandmarker.createFromOptions(vision, opts("GPU")); }
+      catch(e){ landmarker = await PoseLandmarker.createFromOptions(vision, opts("CPU")); }
+    }
+    setMsg('カメラを起動中…');
+    stream = await navigator.mediaDevices.getUserMedia({audio:false, video:{facingMode:{ideal:S.front?'user':'environment'}, width:{ideal:640}, height:{ideal:480}}});
+    video.srcObject=stream; await video.play();
+    try{ wakeLock = await navigator.wakeLock?.request('screen'); }catch(e){}
+    running=true; btn.textContent='停止'; btn.classList.add('running');
+    setMsg(`動作中。焦点距離 ${S.focalPx>0?S.focalPx+'px（校正済）':'自動'}。人を${S.calibM} m先に立たせて「校正」を押すと精度が上がります。`);
+    requestAnimationFrame(step);
+  }catch(e){ setMsg('起動できません: '+e.message+'（HTTPSで開いていますか？カメラ許可は？）'); }
+}
+function stop(){
+  running=false; morseStop(); if(session) sessionEnd();
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+  try{ wakeLock?.release(); }catch(e){}
+  document.getElementById('btnStart').textContent='開始'; document.getElementById('btnStart').classList.remove('running');
+  setStatus('停止', null); setMsg(`停止しました。記録 ${rows.length} 行。「CSVを保存」で書き出せます。`);
+}
+document.getElementById('btnStart').onclick=start;
+document.getElementById('btnCsv').onclick=exportCsv;
+document.getElementById('btnCal').onclick=()=>{
+  if(calibBuf.length<5){ setMsg('校正できません。人の両肩が映っている状態で押してください。'); return; }
+  const sh = [...calibBuf].sort((a,b)=>a-b)[Math.floor(calibBuf.length/2)];
+  S.focalPx = Math.round(sh * S.calibM / (S.shoulderMm/1000)); saveS(); bindSettings();
+  logEvent(`calib focal=${S.focalPx}px at ${S.calibM}m (shoulder ${sh.toFixed(1)}px)`, {event:'calib'});
+  setMsg(`校正完了：焦点距離 ${S.focalPx} px（肩幅 ${sh.toFixed(0)} px @ ${S.calibM} m）`);
+};
+for(const [id,L,pn] of [['tK','K',0],['tL','L',-1],['tR','R',1]]) document.getElementById(id).onclick=async()=>{ initAudio(); await actx.resume(); playPattern(pattern(L, S.gapFar), pn); };
+document.getElementById('tV').onclick=()=>{ speak(TEXT.approach.C); };
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && running && !wakeLock) navigator.wakeLock?.request('screen').then(w=>wakeLock=w).catch(()=>{}); });
+</script>
+</body>
+</html>
