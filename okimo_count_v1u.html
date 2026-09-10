@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#101418">
+<title>OKIMO 人数認識 v1+U（USB有線・骨伝導振動）</title>
+<style>
+  :root{--bg:#101418;--panel:#1a2028;--line:#2c3642;--fg:#e8edf2;--dim:#8a97a6;--c:#f5c542;--l:#5ec8ff;--r:#ff7a6b;--ok:#6fdc8c}
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,"Hiragino Sans","Noto Sans JP",system-ui,sans-serif;-webkit-text-size-adjust:100%}
+  body{padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+  #stage{position:relative;width:100%;aspect-ratio:4/3;background:#000;overflow:hidden}
+  #video,#overlay{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  #hud{position:absolute;left:0;right:0;top:0;padding:8px 10px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;text-shadow:0 1px 3px #000}
+  #count{font-size:52px;font-weight:800;line-height:1}
+  #count small{font-size:18px;font-weight:600;margin-left:4px}
+  #metrics{font-size:12px;color:#d9e1ea;text-align:right;line-height:1.4;white-space:pre}
+  #session{position:absolute;left:10px;bottom:8px;font-size:13px;text-shadow:0 1px 3px #000}
+  #session b{color:var(--ok)}
+  #zones{display:grid;grid-template-columns:repeat(3,1fr);text-align:center;font-size:15px;padding:6px 0;border-bottom:1px solid var(--line)}
+  #zones div b{font-size:22px;display:block}
+  #zones .L b{color:var(--l)} #zones .C b{color:var(--c)} #zones .R b{color:var(--r)}
+  #controls{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:10px}
+  button{font:inherit;font-size:15px;padding:12px 6px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--fg)}
+  button:active{background:#242d38}
+  button.primary{background:#1d4d33;border-color:#2c7a4b;font-weight:700}
+  button.primary.running{background:#5a1f1f;border-color:#a33}
+  button:focus-visible{outline:2px solid var(--l)}
+  #msg{padding:0 10px 6px;font-size:13px;color:var(--dim);min-height:1.4em}
+  details{margin:0 10px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+  summary{padding:10px 12px;cursor:pointer;font-weight:600}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;padding:0 12px 12px}
+  .grid label{font-size:12px;color:var(--dim);display:flex;flex-direction:column;gap:3px}
+  .grid input[type=number],.grid input[type=text],.grid select{font:inherit;font-size:15px;padding:7px 8px;border-radius:7px;border:1px solid var(--line);background:#0d1115;color:var(--fg);width:100%}
+  .grid .wide{grid-column:1/-1}
+  .grid .chk{flex-direction:row;align-items:center;gap:8px;font-size:14px;color:var(--fg)}
+  .row{display:flex;gap:8px;padding:0 12px 12px;flex-wrap:wrap}
+  .row button{flex:1;padding:9px 4px;font-size:14px}
+  #log{margin:0 10px 14px;font-size:12px;color:#c3ccd6;line-height:1.5;max-height:160px;overflow:auto;border-top:1px solid var(--line);padding-top:6px}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+  <div id="hud">
+    <div id="count">–<small>人</small></div>
+    <div id="metrics"></div>
+  </div>
+  <div id="session">セッション <b>—</b></div>
+</div>
+<div id="zones"><div class="L"><b>–</b>左</div><div class="C"><b>–</b>正面</div><div class="R"><b>–</b>右</div></div>
+
+<div id="controls">
+  <button id="btnStart" class="primary">開始</button>
+  <button id="btnSay">今の人数を読む</button>
+  <button id="btnCsv">CSVを保存</button>
+</div>
+<div id="msg">「開始」でカメラ・音声・モデルを起動します。</div>
+
+<details>
+  <summary>設定（人数の伝え方・判定・モールス）</summary>
+  <div class="grid">
+    <label>検出しきい値 (0–1)<input type="number" id="s_score" step="0.05" min="0.1" max="0.9"></label>
+    <label>人数の安定化窓 (秒)<input type="number" id="s_stableSec" step="0.1" min="0.2"></label>
+    <label>変化時の最短通知間隔 (秒)<input type="number" id="s_minGapSec" step="0.5" min="0"></label>
+    <label>定期再通知 (秒, 0=しない)<input type="number" id="s_repeatSec" step="5" min="0"></label>
+    <label>認識する最大距離 (m, 0=無制限)<input type="number" id="s_maxM" step="0.5" min="0"></label>
+    <label>標準身長 (mm, 距離推定用)<input type="number" id="s_heightMm" step="10"></label>
+    <label>焦点距離 (px, 0=自動)<input type="number" id="s_focalPx" step="1"></label>
+    <label>セッション長 (秒)<input type="number" id="s_sessionSec" step="5"></label>
+    <label>短点 (ms)<input type="number" id="s_dot" step="10" min="20"></label>
+    <label>音の高さ (Hz)<input type="number" id="s_toneHz" step="50" min="80"></label>
+    <label>出力<select id="s_outMode"><option value="tone">音（トーン）</option><option value="buzz">振動（低周波バズ）</option><option value="both">音＋振動</option></select></label>
+    <label>振動の周波数 (Hz)<input type="number" id="s_buzzHz" step="10" min="40" max="300"></label>
+    <label>振動のうねり (Hz, 0=なし)<input type="number" id="s_buzzMod" step="5" min="0" max="100"></label>
+    <label>音色<select id="s_wave"><option value="sine">sine</option><option value="triangle">triangle</option><option value="square">square</option></select></label>
+    <label>最大検出人数<input type="number" id="s_maxN" step="1" min="1" max="20"></label>
+    <label class="chk"><input type="checkbox" id="s_speech">音声を出す</label>
+    <label class="chk"><input type="checkbox" id="s_zonesSpeech">左・正面・右の内訳も読む</label>
+    <label class="chk"><input type="checkbox" id="s_morse">人数をモールス数字でも送る</label>
+    <label class="chk"><input type="checkbox" id="s_sayZero">0人になった時も読む</label>
+    <label class="chk"><input type="checkbox" id="s_pan">人の多い側のイヤホンに振り分ける（左右同数・正面のみ＝両耳）</label>
+    <label class="chk"><input type="checkbox" id="s_vibrate">本体バイブも使う (Android)</label>
+    <label class="wide">Pico 2 W のURL（例 https://192.168.1.50）<input type="url" id="s_picoUrl" placeholder="https://192.168.1.50" autocapitalize="off"></label>
+    <label class="chk"><input type="checkbox" id="s_pico">電気刺激スイッチ（Pico）に送る　※USB接続時はURL不要</label>
+    <label class="chk"><input type="checkbox" id="s_keepAlive">Bluetoothを起こしておく</label>
+    <label class="chk"><input type="checkbox" id="s_front">前面カメラを使う</label>
+  </div>
+  <div class="row">
+    <button id="t3">試聴 3</button><button id="tV">音声試験</button><button id="tU">USB接続（有線）</button><button id="tP">Wi-Fi接続テスト</button><button id="sReset">初期値に戻す</button>
+  </div>
+</details>
+
+<div id="log"></div>
+
+<script type="module">
+import { FilesetResolver, ObjectDetector } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+
+/* ===================== 設定 ===================== */
+const DEF = {
+  score:0.45, stableSec:1.0, minGapSec:2.0, repeatSec:0, maxM:0, heightMm:1700, focalPx:0,
+  sessionSec:30, dot:120, toneHz:700, wave:'triangle', maxN:10, picoUrl:'', pico:false, outMode:'both', buzzHz:120, buzzMod:30, pan:true,
+  speech:true, zonesSpeech:true, morse:true, sayZero:true, vibrate:true, keepAlive:true, front:false,
+};
+const MORSE = {0:'-----',1:'.----',2:'..---',3:'...--',4:'....-',5:'.....',6:'-....',7:'--...',8:'---..',9:'----.'};
+let S={...DEF};
+try{ S={...DEF, ...JSON.parse(localStorage.getItem('okimo_count_v1u')||'{}')}; }catch(e){}
+const saveS=()=>{ try{ localStorage.setItem('okimo_count_v1u', JSON.stringify(S)); }catch(e){} };
+function bindSettings(){
+  for(const k of Object.keys(DEF)){
+    const el=document.getElementById('s_'+k); if(!el) continue;
+    if(el.type==='checkbox') el.checked=!!S[k]; else el.value=S[k];
+    el.oninput=()=>{ S[k]= el.type==='checkbox'?el.checked : el.type==='number'?parseFloat(el.value) : el.value; saveS();
+      if(k==='keepAlive'&&ka) ka.gain.setValueAtTime(S.keepAlive?0.02:0, actx.currentTime); };
+  }
+}
+bindSettings();
+document.getElementById('tU').onclick=async()=>{ await usbConnect(); if(usb.ok){ S.pico=true; saveS(); bindSettings(); setTimeout(()=>usbWrite('ON 300'),500); } };
+document.getElementById('tP').onclick=async()=>{
+  if(!S.picoUrl){ setMsg('PicoのURLを入力してください。'); return; }
+  const u=S.picoUrl.replace(/\/+$/,'');
+  try{ const r=await fetch(u+'/ping',{mode:'cors',cache:'no-store'}); const t=await r.text(); setMsg('Pico応答: '+t.trim()+' → 300 msの試験通電を送ります'); fetch(u+'/morse?seq=300,100',{mode:'cors'}); }
+  catch(e){ setMsg('Picoに接続できません。まず '+u+'/ をブラウザで開いて証明書を承認し、同じWi-Fiにいるか確認してください。'); }
+};
+document.getElementById('sReset').onclick=()=>{ S={...DEF}; saveS(); bindSettings(); };
+
+/* ===================== 音・音声 ===================== */
+let actx=null,gain=null,osc=null,ka=null,panner=null,gainB=null,bosc=null,lfo=null,lfoGain=null;
+function initAudio(){
+  if(actx) return;
+  if(navigator.audioSession){ try{ navigator.audioSession.type='playback'; }catch(e){} }
+  actx=new (window.AudioContext||window.webkitAudioContext)();
+  panner = actx.createStereoPanner ? actx.createStereoPanner() : null;
+  const sink = panner || actx.destination; if(panner) panner.connect(actx.destination);
+  gain=actx.createGain(); gain.gain.value=0; gain.connect(sink);
+  osc=actx.createOscillator(); osc.type=S.wave; osc.frequency.value=S.toneHz; osc.connect(gain); osc.start();
+  // 振動系：低周波矩形波＋うねり（骨伝導で「ブルブル」と体感）
+  gainB=actx.createGain(); gainB.gain.value=0; gainB.connect(sink);
+  lfoGain=actx.createGain(); lfoGain.gain.value=0.5; lfoGain.connect(gainB);
+  bosc=actx.createOscillator(); bosc.type='square'; bosc.frequency.value=S.buzzHz; bosc.connect(lfoGain); bosc.start();
+  lfo=actx.createOscillator(); lfo.type='sine'; lfo.frequency.value=S.buzzMod||0.001;
+  const depth=actx.createGain(); depth.gain.value=0.5; lfo.connect(depth); depth.connect(lfoGain.gain); lfo.start();
+  ka=actx.createGain(); ka.gain.value=S.keepAlive?0.02:0; ka.connect(actx.destination);
+  const ko=actx.createOscillator(); ko.type='sine'; ko.frequency.value=40; ko.connect(ka); ko.start();
+}
+function beep(ms=80,hz=1200){ if(!actx) return; const t=actx.currentTime; osc.frequency.setValueAtTime(hz,t); gain.gain.setValueAtTime(0.6,t); gain.gain.setValueAtTime(0,t+ms/1000); osc.frequency.setValueAtTime(S.toneHz,t+ms/1000+0.01); }
+function morseDigits(n){ // 人数を数字符号で（2桁以上は桁ごと、桁間3単位）
+  const u=S.dot, seq=[], str=String(Math.min(n,99));
+  for(let c=0;c<str.length;c++){ const code=MORSE[str[c]]; for(let i=0;i<code.length;i++){ seq.push(code[i]==='.'?u:3*u); seq.push(i<code.length-1?u:3*u); } }
+  return seq;
+}
+
+/* ===== USB 有線接続（WebUSB, Android Chrome）: Pico の USB シリアル(CDC)を直接つかむ ===== */
+const usb={dev:null,epIn:null,epOut:null,ctrlIf:null,dataIf:null,ok:false,rx:''};
+async function usbConnect(){
+  if(!navigator.usb){ setMsg('この端末のブラウザは WebUSB 非対応です（Android の Chrome を使ってください）'); return; }
+  try{
+    const dev=await navigator.usb.requestDevice({filters:[{vendorId:0x2E8A}]});   // Raspberry Pi
+    await dev.open(); if(dev.configuration===null) await dev.selectConfiguration(1);
+    for(const itf of dev.configuration.interfaces){
+      const alt=itf.alternates[0];
+      if(alt.interfaceClass===0x02) usb.ctrlIf=itf.interfaceNumber;
+      if(alt.interfaceClass===0x0A){ usb.dataIf=itf.interfaceNumber; for(const ep of alt.endpoints){ if(ep.type==='bulk'){ if(ep.direction==='out') usb.epOut=ep.endpointNumber; else usb.epIn=ep.endpointNumber; } } }
+    }
+    if(usb.ctrlIf!=null){ try{ await dev.claimInterface(usb.ctrlIf); }catch(e){} }
+    await dev.claimInterface(usb.dataIf);
+    // 115200 8N1 と DTR/RTS（CDC の作法。MicroPython は無くても動くが念のため）
+    try{ await dev.controlTransferOut({requestType:'class',recipient:'interface',request:0x20,value:0,index:usb.ctrlIf??0}, new Uint8Array([0x00,0xC2,0x01,0x00,0,0,8])); }catch(e){}
+    try{ await dev.controlTransferOut({requestType:'class',recipient:'interface',request:0x22,value:0x03,index:usb.ctrlIf??0}); }catch(e){}
+    usb.dev=dev; usb.ok=true; usbReadLoop();
+    dev.addEventListener?.('disconnect',()=>{ usb.ok=false; usb.dev=null; });
+    navigator.usb.addEventListener('disconnect',ev=>{ if(ev.device===usb.dev){ usb.ok=false; usb.dev=null; setMsg('USB が外れました'); } });
+    await usbWrite('PING'); await usbWrite('REPORT 1');
+    setMsg('USB 接続しました（Pico）。'); logEvent('usb connected',{event:'usb_connected'});
+  }catch(e){ usb.ok=false; setMsg('USB 接続できません: '+e.message); }
+}
+async function usbWrite(line){
+  if(!usb.ok) return false;
+  try{ await usb.dev.transferOut(usb.epOut, new TextEncoder().encode(line+'\n')); return true; }
+  catch(e){ usb.ok=false; setMsg('USB 送信失敗: '+e.message); return false; }
+}
+async function usbReadLoop(){
+  const dec=new TextDecoder();
+  while(usb.ok){
+    try{
+      const r=await usb.dev.transferIn(usb.epIn,64);
+      usb.rx+=dec.decode(r.data); let i;
+      while((i=usb.rx.indexOf('\n'))>=0){ const line=usb.rx.slice(0,i).trim(); usb.rx=usb.rx.slice(i+1); if(line) usbLine(line); }
+    }catch(e){ usb.ok=false; break; }
+  }
+}
+function usbLine(line){
+  if(line.startsWith('S ')){ try{ const j=JSON.parse(line.slice(2)); if(j.reflex!==picoState.reflex) logEvent(j.reflex?`Pico反射ON ${j.mm}mm`:'Pico反射OFF',{event:j.reflex?'pico_reflex_on':'pico_reflex_off'}); picoState.mm=j.mm; picoState.reflex=j.reflex; picoState.ok=true; }catch(e){} }
+  else if(line.startsWith('E ')){ logEvent('Pico '+line.slice(2),{event:'pico_event'}); }
+  else if(line==='PONG'){ setMsg('Pico応答: PONG（USB）'); }
+}
+/* 経路の振り分け：USB がつながっていれば USB、なければ Wi-Fi(http) */
+function picoCmd(path){
+  if(path.startsWith('/morse?seq=')) return 'MORSE '+path.slice(11);
+  if(path==='/stop') return 'STOP';
+  if(path==='/ping') return 'PING';
+  return null;
+}
+/* Pico 2 W（フォトMOSリレーで低周波電極回路を開閉）へ同じ on/off 列を送る */
+let picoErr=0;
+function sendPico(path){
+  if(!S.pico) return;
+  if(usb.ok){ const c=picoCmd(path); if(c) usbWrite(c); return; }
+  if(!S.picoUrl) return;
+  const u=S.picoUrl.replace(/\/+$/,'')+path;
+  fetch(u,{mode:'cors',cache:'no-store',keepalive:true}).then(()=>{ picoErr=0; }).catch(()=>{ if(++picoErr<=3) setMsg('Picoに送れません: '+u+'（同じWi-Fiか、証明書を一度ブラウザで承認したか確認）'); });
+}
+/* Pico の反射層（レーザーToF）の状態を毎 0.5 秒読み、CSV と画面に残す */
+const picoState={mm:null,reflex:0,ok:false};
+async function pollPico(){
+  if(usb.ok||!S.pico||!S.picoUrl||!running) return;
+  try{ const j=await (await fetch(S.picoUrl.replace(/\/+$/,'')+'/sensors',{mode:'cors',cache:'no-store'})).json();
+    if(j.reflex!==picoState.reflex) logEvent(j.reflex?`Pico反射ON ${j.mm}mm`:'Pico反射OFF',{event:j.reflex?'pico_reflex_on':'pico_reflex_off'});
+    picoState.mm=j.mm; picoState.reflex=j.reflex; picoState.ok=true;
+  }catch(e){ picoState.ok=false; }
+}
+setInterval(pollPico,500);
+function playPattern(seq, pan=0){ // pan: -1=左耳, 0=両耳, +1=右耳
+  sendPico('/morse?seq='+seq.map(v=>Math.round(v)).join(','));
+  if(!actx) return 0;
+  const now=actx.currentTime;
+  if(panner) panner.pan.setValueAtTime(S.pan?pan:0, now);
+  osc.type=S.wave; osc.frequency.setValueAtTime(S.toneHz,now);
+  bosc.frequency.setValueAtTime(S.buzzHz,now); lfo.frequency.setValueAtTime(S.buzzMod||0.001,now);
+  const useT=S.outMode!=='buzz', useB=S.outMode!=='tone';
+  for(const g of [gain,gainB]){ g.gain.cancelScheduledValues(now); g.gain.setValueAtTime(0,now); }
+  let t=now+0.05,total=0; const volT=S.wave==='square'?0.5:0.9, volB=0.8;
+  const env=(g,vol,t,on)=>{ const r=Math.min(0.006,on/4); g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(vol,t+r); g.gain.setValueAtTime(vol,t+on-r); g.gain.linearRampToValueAtTime(0,t+on); };
+  for(let i=0;i<seq.length;i+=2){
+    const on=seq[i]/1000;
+    if(useT) env(gain,volT,t,on);
+    if(useB) env(gainB,volB,t,on);
+    t+=on+seq[i+1]/1000; total+=seq[i]+seq[i+1];
+  }
+  if(S.vibrate&&navigator.vibrate){ try{ navigator.vibrate(seq); }catch(e){} }
+  return total;
+}
+function speak(text){
+  if(!S.speech||!('speechSynthesis' in window)) return;
+  const u=new SpeechSynthesisUtterance(text); u.lang='ja-JP'; u.rate=1.1; speechSynthesis.cancel(); speechSynthesis.speak(u);
+}
+function countText(n,z){
+  if(n===0) return '人はいません';
+  let t=`${n}人`;
+  if(S.zonesSpeech && n>0){
+    const parts=[]; if(z.L) parts.push(`左${z.L}人`); if(z.C) parts.push(`正面${z.C}人`); if(z.R) parts.push(`右${z.R}人`);
+    if(parts.length===1 && n===1) t = parts[0].replace(/\d+人/, '1人'); else t += '、' + parts.join('、');
+  }
+  return t;
+}
+function announce(n,z,reason){
+  const text=countText(n,z);
+  speak(text);
+  if(S.morse && n>0){ playPattern(morseDigits(n), z.L>z.R?-1:z.R>z.L?1:0); }
+  logEvent(text+`（${reason}）`, {event:'speech:'+text, morse:S.morse&&n>0?String(n):''});
+}
+
+/* ===================== 記録 ===================== */
+let rows=[],session=null,seq=0;
+const HEAD=['session_id','timestamp','t_session_s','count_raw','count_stable','left','center','right','nearest_m','boxes','event','morse','pico_mm','pico_reflex'];
+function iso(){ const d=new Date(),p=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3,'0')}`; }
+function addRow(extra={}){
+  if(!session) return;
+  rows.push({session_id:session.id,timestamp:iso(),t_session_s:((performance.now()-session.t0)/1000).toFixed(3),
+    count_raw:cur.raw,count_stable:cur.n,left:cur.z.L,center:cur.z.C,right:cur.z.R,nearest_m:cur.nearest!=null?cur.nearest.toFixed(2):'',
+    boxes:cur.boxes.map(b=>`${b.zone}:${b.x.toFixed(2)},${b.y.toFixed(2)},${b.w.toFixed(2)},${b.h.toFixed(2)},${b.s.toFixed(2)}`).join(' '),
+    event:extra.event||'',morse:extra.morse||'',pico_mm:picoState.mm??'',pico_reflex:picoState.ok?picoState.reflex:''});
+}
+function logEvent(text,extra={}){
+  addRow({event:extra.event??text,morse:extra.morse});
+  const el=document.getElementById('log'),d=document.createElement('div'); d.textContent=`${iso().slice(11,23)}  ${text}`; el.prepend(d);
+  while(el.children.length>40) el.lastChild.remove();
+}
+function sessionStart(){ seq++; const id=iso().replace(/[-:T.]/g,'').slice(0,15)+'_'+String(seq).padStart(2,'0'); session={id,t0:performance.now()}; logEvent(`session start ${id}`,{event:'session_start'}); }
+function sessionEnd(){ logEvent('session end',{event:'session_end'}); session=null; beep(); setTimeout(beep,140); }
+async function exportCsv(){
+  if(!rows.length){ setMsg('記録がまだありません。'); return; }
+  const esc=v=>{ v=String(v??''); return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v; };
+  const txt='\uFEFF'+HEAD.join(',')+'\n'+rows.map(r=>HEAD.map(h=>esc(r[h])).join(',')).join('\n');
+  const name='okimo_count_'+iso().replace(/[-:T]/g,'').slice(0,15)+'.csv';
+  const blob=new Blob([txt],{type:'text/csv;charset=utf-8'}), file=new File([blob],name,{type:'text/csv'});
+  if(navigator.canShare&&navigator.canShare({files:[file]})){ try{ await navigator.share({files:[file],title:name}); setMsg(`共有しました: ${name}（${rows.length}行）`); return; }catch(e){ if(e.name==='AbortError') return; } }
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); a.remove();
+  setMsg(`保存しました: ${name}（${rows.length}行）`);
+}
+
+/* ===================== 検出・人数の安定化 ===================== */
+const video=document.getElementById('video'),canvas=document.getElementById('overlay'),ctx=canvas.getContext('2d');
+let detector=null,stream=null,running=false,wakeLock=null;
+const cur={raw:0,n:0,z:{L:0,C:0,R:0},boxes:[],nearest:null};
+let hist=[],lastN=-1,lastZ='',lastAnnounce=-1e9,lastRepeat=0;
+
+/* 検出器の差し替え点：video から [{x,y,w,h,s}]（0–1正規化・sはスコア）の人物ボックス配列を返す */
+function detectPeople(ts){
+  const res=detector.detectForVideo(video,ts); const W=video.videoWidth,H=video.videoHeight,out=[];
+  for(const d of res.detections||[]){
+    const c=d.categories&&d.categories[0]; if(!c||c.categoryName!=='person'||c.score<S.score) continue;
+    const b=d.boundingBox; out.push({x:b.originX/W,y:b.originY/H,w:b.width/W,h:b.height/H,s:c.score});
+  }
+  return out.slice(0,S.maxN);
+}
+function distOf(b,H){ const f=S.focalPx>0?S.focalPx:0.78*canvas.width; return f*S.heightMm/1000/(b.h*H); } // 全身が映る前提の概算
+function mode(arr){ const m=new Map(); let best=0,bn=0; for(const v of arr){ const k=(m.get(v)||0)+1; m.set(v,k); if(k>bn){bn=k;best=v;} } return best; }
+function setMsg(t){ document.getElementById('msg').textContent=t; }
+
+function step(now){
+  if(!running) return;
+  const tsec=now/1000;
+  if(video.readyState>=2){
+    const W=canvas.width=video.videoWidth,H=canvas.height=video.videoHeight;
+    let boxes=[]; try{ boxes=detectPeople(now); }catch(e){}
+    ctx.clearRect(0,0,W,H);
+    ctx.strokeStyle='rgba(255,255,255,.35)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(W/3,0); ctx.lineTo(W/3,H); ctx.moveTo(2*W/3,0); ctx.lineTo(2*W/3,H); ctx.stroke();
+    const z={L:0,C:0,R:0}; let nearest=null;
+    for(const b of boxes){
+      b.d=distOf(b,H); if(S.maxM>0 && b.d>S.maxM){ b.zone='far'; continue; }
+      const cx=b.x+b.w/2; b.zone=cx<1/3?'L':cx>2/3?'R':'C'; z[b.zone]++;
+      if(nearest==null||b.d<nearest) nearest=b.d;
+      ctx.strokeStyle=b.zone==='L'?'#5ec8ff':b.zone==='R'?'#ff7a6b':'#f5c542'; ctx.lineWidth=3; ctx.strokeRect(b.x*W,b.y*H,b.w*W,b.h*H);
+      ctx.fillStyle=ctx.strokeStyle; ctx.font='bold 16px sans-serif'; ctx.fillText(`${b.d.toFixed(1)}m ${(b.s*100).toFixed(0)}%`,b.x*W+4,b.y*H+18);
+    }
+    cur.boxes=boxes.filter(b=>b.zone!=='far'); cur.raw=cur.boxes.length; cur.z=z; cur.nearest=nearest;
+    hist.push({t:tsec,n:cur.raw,z}); while(hist.length&&tsec-hist[0].t>S.stableSec) hist.shift();
+    cur.n=mode(hist.map(h=>h.n));
+    // 安定化した人数に一致する直近フレームの内訳を採用
+    const ref=[...hist].reverse().find(h=>h.n===cur.n); if(ref) cur.z=ref.z;
+    if(cur.raw>0&&!session) sessionStart();
+  }
+  const zkey=`${cur.z.L}/${cur.z.C}/${cur.z.R}`;
+  const changed = cur.n!==lastN || (S.zonesSpeech && cur.n>0 && zkey!==lastZ);
+  if(changed && tsec-lastAnnounce>=S.minGapSec && (cur.n>0 || S.sayZero || lastN>0)){
+    if(!(cur.n===0 && !S.sayZero)) announce(cur.n,cur.z,'変化');
+    lastN=cur.n; lastZ=zkey; lastAnnounce=tsec; lastRepeat=tsec;
+  } else if(S.repeatSec>0 && cur.n>0 && tsec-lastRepeat>=S.repeatSec){ announce(cur.n,cur.z,'定期'); lastRepeat=tsec; }
+
+  document.getElementById('count').innerHTML=`${cur.n}<small>人</small>`;
+  document.querySelector('#zones .L b').textContent=cur.z.L; document.querySelector('#zones .C b').textContent=cur.z.C; document.querySelector('#zones .R b').textContent=cur.z.R;
+  document.getElementById('metrics').textContent=`瞬時 ${cur.raw}人\n最近接 ${cur.nearest!=null?cur.nearest.toFixed(1)+' m':'–'}` + (S.pico?`\nPico ${picoState.ok?(picoState.mm!=null?picoState.mm+'mm':'–'):'未接続'}${picoState.reflex?' 反射中':''}`:'');
+  if(session){ addRow(); const el=(performance.now()-session.t0)/1000; document.querySelector('#session b').textContent=`${session.id.slice(-2)}  ${el.toFixed(1)} / ${S.sessionSec} s`; if(el>=S.sessionSec) sessionEnd(); }
+  else document.querySelector('#session b').textContent='—';
+  requestAnimationFrame(step);
+}
+
+/* ===================== 起動・停止 ===================== */
+async function start(){
+  const btn=document.getElementById('btnStart'); if(running){ stop(); return; }
+  try{
+    initAudio(); await actx.resume(); speak('開始');
+    setMsg('モデルを読み込み中…');
+    if(!detector){
+      const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
+      const opts=d=>({baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",delegate:d},runningMode:"VIDEO",scoreThreshold:0.3,maxResults:20,categoryAllowlist:['person']});
+      try{ detector=await ObjectDetector.createFromOptions(vision,opts("GPU")); }catch(e){ detector=await ObjectDetector.createFromOptions(vision,opts("CPU")); }
+    }
+    setMsg('カメラを起動中…');
+    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:S.front?'user':'environment'},width:{ideal:640},height:{ideal:480}}});
+    video.srcObject=stream; await video.play();
+    try{ wakeLock=await navigator.wakeLock?.request('screen'); }catch(e){}
+    running=true; btn.textContent='停止'; btn.classList.add('running'); hist=[]; lastN=-1; lastZ='';
+    setMsg('動作中。人数が変わると音声（＋モールス数字）で通知します。');
+    requestAnimationFrame(step);
+  }catch(e){ setMsg('起動できません: '+e.message+'（HTTPSで開いていますか？カメラ許可は？）'); }
+}
+function stop(){
+  running=false; if(session) sessionEnd(); if(stream){ stream.getTracks().forEach(t=>t.stop()); stream=null; }
+  try{ wakeLock?.release(); }catch(e){}
+  document.getElementById('btnStart').textContent='開始'; document.getElementById('btnStart').classList.remove('running');
+  setMsg(`停止しました。記録 ${rows.length} 行。「CSVを保存」で書き出せます。`);
+}
+document.getElementById('btnStart').onclick=start;
+document.getElementById('btnCsv').onclick=exportCsv;
+document.getElementById('btnSay').onclick=()=>{ initAudio(); actx.resume(); announce(cur.n,cur.z,'手動'); };
+document.getElementById('t3').onclick=async()=>{ initAudio(); await actx.resume(); playPattern(morseDigits(3)); };
+document.getElementById('tV').onclick=()=>{ speak(countText(3,{L:1,C:2,R:0})); };
+document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible'&&running&&!wakeLock) navigator.wakeLock?.request('screen').then(w=>wakeLock=w).catch(()=>{}); });
+</script>
+</body>
+</html>
