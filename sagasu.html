@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>なにがあるかな？カメラ（grid9 v4）</title>
+<style>
+  :root{--bg:#0b1020;--card:#1f2937;--acc:#2563eb;--ok:#16a34a;--warn:#f59e0b;--ng:#dc2626;--fg:#fff;--pink:#ec4899}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--fg);min-height:100dvh;padding:8px}
+  .wrap{max-width:720px;margin:0 auto;display:grid;gap:10px}
+  h1{font-size:1.3rem;text-align:center}
+  #status{font-size:1.5rem;font-weight:900;text-align:center;min-height:2.4em;line-height:1.3;padding:10px;border-radius:20px;background:#1e293b;border:3px solid #334155}
+  #status.talk{border-color:var(--pink)}
+  .stage{position:relative;aspect-ratio:3/4;max-height:50dvh;background:#000;border-radius:20px;overflow:hidden;margin:0 auto;width:100%;touch-action:manipulation}
+  video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  .stage.mirror video,.stage.mirror canvas{transform:scaleX(-1)}
+  button{width:100%;min-height:64px;padding:12px;border:3px solid #fff;border-radius:20px;font-size:1.3rem;font-weight:700;color:#fff;background:var(--acc);cursor:pointer}
+  button:disabled{opacity:.35}
+  button.on{background:var(--ok)}
+  button.mic{background:var(--pink)}button.mic.on{background:var(--ok);box-shadow:0 0 14px var(--ok)}
+  button.find{background:var(--warn);color:#000}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .small{min-height:48px;font-size:1.05rem}
+  #list{background:var(--card);border-radius:20px;padding:12px;font-size:1.2rem;line-height:1.6}
+  #list .now{background:var(--warn);color:#000;border-radius:8px;padding:0 6px}
+  .hint{font-size:.85rem;opacity:.75;text-align:center}
+  label{font-size:1rem;display:flex;align-items:center;gap:8px;justify-content:center}
+  select{font-size:1.1rem;padding:8px;border-radius:10px;width:100%}
+  #heard{font-size:1rem;text-align:center;color:#fbcfe8;min-height:1.3em}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📷 なにがあるかな？カメラ</h1>
+  <div id="status" role="status" aria-live="assertive">「カメラをつける」を押してね</div>
+  <div id="heard"></div>
+  <div class="hint">声で「ここに何があるかな」「コップさがして」「もういちど」と言えるよ<br>カメラ画面をタップ → そのマスの物を読む／ほかの場所をタップ → もう一度</div>
+  <div class="stage" id="stage">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <button id="btnCam" class="on">📷 カメラをつける</button>
+  <button id="btnMic" class="mic" disabled>🎤 声で話しかける OFF</button>
+  <button id="btnScan" disabled>🔍 ここに何があるかな？</button>
+  <div class="grid2">
+    <button id="btnAuto" class="small" disabled>🔁 自動（8秒ごと）OFF</button>
+    <button id="btnCamSel" class="small">🔄 外カメラ ⇄ 内カメラ</button>
+  </div>
+  <div class="grid2">
+    <select id="findSel" aria-label="さがす物"><option value="">さがす物を選ぶ…</option></select>
+    <button id="btnFind" class="small find" disabled>🎯 さがして</button>
+  </div>
+  <label><input type="checkbox" id="chkNatural">場所を「上の左」みたいに言う（行・列のかわり）</label>
+  <label><input type="checkbox" id="chkEmpty">なにもないマスも「なにもないよ」と言う</label>
+  <label><input type="checkbox" id="chkHiAcc">くわしいモデル（少しおそいけど正確）</label>
+  <div id="list">まだ見ていないよ</div>
+</div>
+
+<script type="module">
+import {ObjectDetector, FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const $=id=>document.getElementById(id);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function vib(p){try{navigator.vibrate&&navigator.vibrate(p);}catch(e){}}
+let audioCtx=null;
+function beep(freq=880,ms=60,vol=.25){try{audioCtx=audioCtx||new (window.AudioContext||window.webkitAudioContext)();
+  const o=audioCtx.createOscillator(),g=audioCtx.createGain();o.frequency.value=freq;g.gain.value=vol;o.connect(g);g.connect(audioCtx.destination);
+  o.start();o.stop(audioCtx.currentTime+ms/1000);}catch(e){}}
+
+/* ---------- こどもの声（高め・少し速め） ---------- */
+let kidVoice=null;
+function pickVoice(){const vs=speechSynthesis.getVoices().filter(v=>v.lang.startsWith("ja"));
+  kidVoice=vs.find(v=>/Kyoko|Nanami|O-ren|Google 日本語|Haruka|Ayumi/i.test(v.name))||vs[0]||null;}
+if(window.speechSynthesis){pickVoice();speechSynthesis.onvoiceschanged=pickVoice;}
+let speakToken=0,speaking=false;
+function speakSeq(items){const my=++speakToken;
+  return new Promise(res=>{if(!window.speechSynthesis){res();return;}
+    speechSynthesis.cancel();let i=0;speaking=true;$("status").classList.add("talk");pauseMic();
+    const done=()=>{speaking=false;$("status").classList.remove("talk");resumeMic();res();};
+    const next=()=>{if(my!==speakToken||i>=items.length){done();return;}const it=items[i++];it.cb&&it.cb();
+      const u=new SpeechSynthesisUtterance(it.text);u.lang="ja-JP";u.rate=1.05;u.pitch=1.6;if(kidVoice)u.voice=kidVoice;
+      u.onend=next;u.onerror=next;speechSynthesis.speak(u);};next();});}
+const say=t=>speakSeq([{text:t}]);
+let lastItems=[];
+document.addEventListener("click",e=>{if(e.target.closest("button,input,label,select,#stage"))return;if(lastItems.length)speakSeq(lastItems);vib([60]);});
+
+/* ---------- COCO 80クラス → 日本語 ---------- */
+const JA={person:"人",bicycle:"自転車",car:"車",motorcycle:"バイク",airplane:"飛行機",bus:"バス",train:"電車",truck:"トラック",boat:"船",
+"traffic light":"信号機","fire hydrant":"消火栓","stop sign":"止まれの標識","parking meter":"パーキングメーター",bench:"ベンチ",bird:"鳥",cat:"猫",dog:"犬",horse:"馬",
+sheep:"羊",cow:"牛",elephant:"象",bear:"熊",zebra:"シマウマ",giraffe:"キリン",backpack:"リュック",umbrella:"傘",handbag:"ハンドバッグ",tie:"ネクタイ",suitcase:"スーツケース",
+frisbee:"フリスビー",skis:"スキー板",snowboard:"スノーボード","sports ball":"ボール",kite:"たこ","baseball bat":"バット","baseball glove":"グローブ",skateboard:"スケートボード",
+surfboard:"サーフボード","tennis racket":"ラケット",bottle:"ボトル","wine glass":"ワイングラス",cup:"コップ",fork:"フォーク",knife:"ナイフ",spoon:"スプーン",bowl:"おわん",
+banana:"バナナ",apple:"りんご",sandwich:"サンドイッチ",orange:"みかん",broccoli:"ブロッコリー",carrot:"にんじん","hot dog":"ホットドッグ",pizza:"ピザ",donut:"ドーナツ",cake:"ケーキ",
+chair:"いす",couch:"ソファ","potted plant":"観葉植物",bed:"ベッド","dining table":"テーブル",toilet:"トイレ",tv:"テレビ",laptop:"ノートパソコン",mouse:"マウス",remote:"リモコン",
+keyboard:"キーボード","cell phone":"スマホ",microwave:"電子レンジ",oven:"オーブン",toaster:"トースター",sink:"流し",refrigerator:"冷蔵庫",book:"本",clock:"時計",vase:"花びん",
+scissors:"はさみ","teddy bear":"ぬいぐるみ","hair drier":"ドライヤー",toothbrush:"歯ブラシ"};
+const ja=n=>JA[n]||n;
+const ALIAS={"ほん":"book","コップ":"cup","かばん":"handbag","いす":"chair","椅子":"chair","ケータイ":"cell phone","携帯":"cell phone","電話":"cell phone",
+"パソコン":"laptop","ボトル":"bottle","ペットボトル":"bottle","水筒":"bottle","ねこ":"cat","いぬ":"dog","ぬいぐるみ":"teddy bear","はさみ":"scissors","時計":"clock","とけい":"clock"};
+for(const[k,v]of Object.entries(JA)){const o=document.createElement("option");o.value=k;o.textContent=v;$("findSel").appendChild(o);}
+
+/* ---------- 場所・大きさ・数の言葉 ---------- */
+const ROWJ=["上","まん中","下"],COLJ=["左","まん中","右"];
+function cellName(r,c){if(!$("chkNatural").checked)return`${r+1}行${c+1}列`;if(r===1&&c===1)return"まん中";return`${ROWJ[r]}の${COLJ[c]}`;}
+const CROSS=[{name:"左上のクロス",x:1/3,y:1/3},{name:"右上のクロス",x:2/3,y:1/3},{name:"左下のクロス",x:1/3,y:2/3},{name:"右下のクロス",x:2/3,y:2/3}];
+function sizeWord(d){const a=d.w*d.h;return a>=0.25?"大きい":a>=0.06?"中くらいの":"小さい";}
+const COUNT=["","一つ","二つ","三つ","四つ","五つ","六つ","七つ","八つ","九つ"];
+const cnt=n=>n<10?COUNT[n]:`${n}個`;
+function describe(arr){const byName={};arr.forEach(d=>(byName[d.name]=byName[d.name]||[]).push(d));
+  return Object.entries(byName).map(([n,ds])=>
+    ds.length===1?`${sizeWord(ds[0])}${ja(n)}が一つ`:`${ja(n)}が${cnt(ds.length)}`).join("と、");}
+
+/* ---------- カメラ・検出 ---------- */
+const video=$("video"),cv=$("overlay"),ctx=cv.getContext("2d");
+let det=null,lastT=-1,facing="environment",latest=[],auto=false,autoTimer=null,busy=false,lastScan=null,finding=null;
+async function loadModel(){
+  const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  const m=$("chkHiAcc").checked?"efficientdet_lite2":"efficientdet_lite0";
+  det=await ObjectDetector.createFromOptions(vision,{baseOptions:{modelAssetPath:
+    `https://storage.googleapis.com/mediapipe-models/object_detector/${m}/float16/1/${m}.tflite`,delegate:"GPU"},
+    scoreThreshold:0.4,maxResults:20,runningMode:"VIDEO"});}
+async function startCam(){
+  $("btnCam").disabled=true;$("status").textContent="ちょっとまってね…";say("ちょっとまってね。じゅんびしてるよ");
+  try{
+    if(!det)await loadModel();
+    if(video.srcObject)video.srcObject.getTracks().forEach(t=>t.stop());
+    video.srcObject=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:640},height:{ideal:480}},audio:false});
+    await video.play();cv.width=video.videoWidth;cv.height=video.videoHeight;
+    $("stage").classList.toggle("mirror",facing==="user");
+    $("btnCam").textContent="📷 カメラをつけなおす";$("btnCam").disabled=false;
+    ["btnScan","btnAuto","btnFind","btnMic"].forEach(i=>$(i).disabled=false);
+    $("status").textContent="じゅんびできたよ！「ここに何があるかな？」って聞いてね";
+    await say("じゅんびできたよ！ ここに何があるかな、って聞いてね。マイクのボタンを押すと、声でお話しできるよ");
+    requestAnimationFrame(loop);
+  }catch(e){$("status").textContent="カメラがつかえないみたい："+e.message;say("ごめんね、カメラがつかえないみたい");$("btnCam").disabled=false;}}
+$("btnCam").onclick=startCam;
+$("btnCamSel").onclick=()=>{facing=facing==="environment"?"user":"environment";say(facing==="environment"?"外のカメラにしたよ":"内側のカメラにしたよ");if(det)startCam();};
+$("chkHiAcc").onchange=async()=>{if(!det)return;$("status").textContent="モデルを入れかえ中…";det=null;await loadModel();$("status").textContent="入れかえたよ";say("入れかえたよ");};
+
+function loop(){
+  if(det&&video.readyState>=2&&video.currentTime!==lastT){lastT=video.currentTime;
+    const r=det.detectForVideo(video,performance.now());
+    latest=r.detections.map(d=>{const b=d.boundingBox;return{name:d.categories[0].categoryName,score:d.categories[0].score,
+      x:b.originX/cv.width,y:b.originY/cv.height,w:b.width/cv.width,h:b.height/cv.height};});
+    draw(latest);if(finding)findTick();}
+  requestAnimationFrame(loop);}
+function draw(ds,hl=null){
+  ctx.clearRect(0,0,cv.width,cv.height);const W=cv.width,H=cv.height;
+  ctx.strokeStyle="rgba(255,255,255,.8)";ctx.lineWidth=3;
+  for(let i=1;i<3;i++){ctx.beginPath();ctx.moveTo(W*i/3,0);ctx.lineTo(W*i/3,H);ctx.stroke();ctx.beginPath();ctx.moveTo(0,H*i/3);ctx.lineTo(W,H*i/3);ctx.stroke();}
+  ctx.font=`${Math.round(H/28)}px sans-serif`;ctx.fillStyle="rgba(255,255,255,.7)";
+  for(let r=0;r<3;r++)for(let c=0;c<3;c++)ctx.fillText(`${r+1}-${c+1}`,W*c/3+6,H*r/3+H/28+4);
+  ds.forEach(d=>{const on=hl&&hl===d;ctx.strokeStyle=on?"#f59e0b":"#22c55e";ctx.lineWidth=on?6:3;
+    ctx.strokeRect(d.x*W,d.y*H,d.w*W,d.h*H);ctx.fillStyle=on?"#f59e0b":"#22c55e";
+    ctx.fillText(`${d.idx??""} ${ja(d.name)}`,d.x*W+4,Math.max(d.y*H-6,H/28));});}
+
+/* ---------- 9マス割り当て ---------- */
+function insideFrac(d,r,c){const x0=Math.max(d.x,c/3),y0=Math.max(d.y,r/3),x1=Math.min(d.x+d.w,(c+1)/3),y1=Math.min(d.y+d.h,(r+1)/3);
+  if(x1<=x0||y1<=y0)return 0;return((x1-x0)*(y1-y0))/(d.w*d.h+1e-9);}
+function assign(ds){const cells=Array.from({length:9},()=>[]),cross=[[],[],[],[]];
+  for(const d of ds){const cx=d.x+d.w/2,cy=d.y+d.h/2,r=Math.min(2,Math.floor(cy*3)),c=Math.min(2,Math.floor(cx*3));
+    if(insideFrac(d,r,c)>=0.65)cells[r*3+c].push(d);
+    else{let best=0,bd=9;CROSS.forEach((k,i)=>{const dd=Math.hypot(cx-k.x,cy-k.y);if(dd<bd){bd=dd;best=i;}});cross[best].push(d);}}
+  return{cells,cross};}
+function iou(a,b){const x0=Math.max(a.x,b.x),y0=Math.max(a.y,b.y),x1=Math.min(a.x+a.w,b.x+b.w),y1=Math.min(a.y+a.h,b.y+b.h);
+  const i=Math.max(0,x1-x0)*Math.max(0,y1-y0);return i/(a.w*a.h+b.w*b.h-i+1e-9);}
+function merge(ds){const out=[];for(const d of ds){const m=out.find(o=>o.name===d.name&&iou(o,d)>0.5);
+    if(m){m.n++;m.x+=(d.x-m.x)/m.n;m.y+=(d.y-m.y)/m.n;m.w+=(d.w-m.w)/m.n;m.h+=(d.h-m.h)/m.n;}else out.push({...d,n:1});}
+  const kept=out.filter(o=>o.n>=2).sort((a,b)=>(a.y+a.h/2)-(b.y+b.h/2)||(a.x+a.w/2)-(b.x+b.w/2));
+  kept.forEach((o,i)=>o.idx=i+1);return kept;}
+
+/* ---------- 9マス読み取り（フレンドリーな言い方・数つき） ---------- */
+async function scan(){
+  if(busy||!det)return;busy=true;$("btnScan").disabled=true;stopFind(true);
+  $("status").textContent="えーっとね…";say("えーっとね、見てみるね");vib([80]);
+  const all=[];const end=performance.now()+1100;while(performance.now()<end){all.push(...latest);await sleep(120);}
+  const ds=merge(all);const{cells,cross}=assign(ds);lastScan={ds,cells,cross};
+  const items=[],lines=[];const readEmpty=$("chkEmpty").checked;
+  const add=(text,hl,pat)=>{const i=lines.length;lines.push(text);items.push({text,cb:()=>{draw(ds,hl);hi(i);vib(pat);}});};
+  let first=true;
+  for(let r=0;r<3;r++)for(let c=0;c<3;c++){const a=cells[r*3+c];if(!(a.length||readEmpty))continue;
+    const head=first?"あのね、":"";first=false;
+    add(a.length?`${head}${cellName(r,c)}にはね、${describe(a)}あるよ`:`${head}${cellName(r,c)}には、なにもないよ`,a[0]||null,[40]);}
+  let firstCross=true;
+  cross.forEach((a,i)=>{if(!a.length)return;const head=firstCross?"それとね、":"あとね、";firstCross=false;
+    add(`${head}${CROSS[i].name}のところにはね、${describe(a)}あるよ`,a[0],[40,40,40]);});
+  if(!items.length)add("うーん、なにも見つからなかったよ。もうちょっと近づいてみて",null,[200]);
+  else add(`ぜんぶで${cnt(ds.length)}あったよ。おしまい！`,null,[60,60]);
+  $("list").innerHTML=lines.map((l,i)=>`<div id="ln${i}">${l}</div>`).join("");
+  $("status").textContent=ds.length?`${cnt(ds.length)} 見つけたよ！`:"見つからなかったよ";
+  lastItems=items;await speakSeq(items);
+  busy=false;$("btnScan").disabled=false;}
+function hi(i){document.querySelectorAll("#list div").forEach((d,k)=>d.classList.toggle("now",k===i));}
+$("btnScan").onclick=scan;
+$("btnAuto").onclick=()=>{auto=!auto;$("btnAuto").classList.toggle("on",auto);$("btnAuto").textContent=`🔁 自動（8秒ごと）${auto?"ON":"OFF"}`;
+  say(auto?"じどうで見ていくね":"じどうはおしまい");clearInterval(autoTimer);if(auto){scan();autoTimer=setInterval(scan,8000);}};
+
+/* ---------- さわって探索 ---------- */
+$("stage").addEventListener("click",e=>{
+  const rc=$("stage").getBoundingClientRect();let px=(e.clientX-rc.left)/rc.width,py=(e.clientY-rc.top)/rc.height;
+  if(facing==="user")px=1-px;const r=Math.min(2,Math.floor(py*3)),c=Math.min(2,Math.floor(px*3));
+  const src=lastScan||{cells:assign(merge([...latest,...latest])).cells,ds:latest};
+  const a=src.cells[r*3+c];vib([40]);
+  const t=a.length?`${cellName(r,c)}にはね、${describe(a)}あるよ`:`${cellName(r,c)}には、なにもないよ`;
+  draw(src.ds,a[0]||null);$("status").textContent=t;say(t);});
+
+/* ---------- さがして（誘導） ---------- */
+let lastGuideT=0,lastPulse=0;
+function startFind(n){finding=n;$("findSel").value=n;$("btnFind").textContent="⏹ さがすのをやめる";
+  $("status").textContent=`${ja(n)}をさがすね`;say(`${ja(n)}をさがすね。スマホをゆっくり動かしてね`);}
+function stopFind(quiet){if(!finding)return;finding=null;$("btnFind").textContent="🎯 さがして";if(!quiet)say("さがすのはおしまい");}
+$("btnFind").onclick=()=>{if(finding){stopFind();return;}const n=$("findSel").value;if(!n){say("なにをさがす？ えらんでね");return;}startFind(n);};
+function findTick(){
+  const now=performance.now();const d=latest.filter(x=>x.name===finding).sort((a,b)=>b.w*b.h-a.w*a.h)[0];
+  if(!d){if(now-lastGuideT>3000){lastGuideT=now;$("status").textContent=`${ja(finding)}はまだ見えないよ`;say("まだ見えないよ。ゆっくり回してみて");}return;}
+  let cx=d.x+d.w/2,cy=d.y+d.h/2;if(facing==="user")cx=1-cx;
+  const dx=cx-0.5,dy=cy-0.5,dist=Math.hypot(dx,dy);
+  if(dist>0.2){if(now-lastGuideT>3000){lastGuideT=now;const dir=Math.abs(dx)>Math.abs(dy)?(dx>0?"右":"左"):(dy>0?"下":"上");
+      const t=`${ja(finding)}見えたよ！ カメラを${dir}にむけてね`;$("status").textContent=t;say(t);}}
+  else{const interval=150+dist*2500;
+    if(now-lastPulse>interval){lastPulse=now;beep(dist<0.06?1320:880,50,.3);vib([30]);
+      if(dist<0.06&&now-lastGuideT>2500){lastGuideT=now;const t=`まん中だよ！ ${sizeWord(d)}${ja(finding)}が一つあるよ`;$("status").textContent=t;say(t);}}}}
+
+/* ---------- 声で話しかける（音声認識） ---------- */
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let rec=null,micOn=false,micPaused=false;
+function pauseMic(){if(rec&&micOn){micPaused=true;try{rec.stop();}catch(e){}}}
+function resumeMic(){if(rec&&micOn&&micPaused){micPaused=false;setTimeout(()=>{try{rec.start();}catch(e){}},300);}}
+function handleSpeech(text){$("heard").textContent="🗣 「"+text+"」";const t=text.replace(/\s/g,"");
+  if(/もう(いち|一)ど|もっかい|もう一回/.test(t)){if(lastItems.length)speakSeq(lastItems);else say("まだ見てないよ");return;}
+  if(/やめ|おしまい|ストップ/.test(t)){stopFind();if(auto)$("btnAuto").click();return;}
+  if(/(なに|何)(が)?ある|なにがみえる|何が見える|見て|みて/.test(t)){scan();return;}
+  const m=t.match(/(.+?)(を)?(さがして|探して|どこ)/);
+  if(m){const w=m[1];const key=ALIAS[w]||Object.entries(JA).find(([k,v])=>w.includes(v)||v.includes(w))?.[0];
+    if(key)startFind(key);else say(`${w}は、まださがせないんだ。ごめんね`);return;}
+  say("うーん、よくわからなかった。ここに何があるかな、って聞いてね");}
+$("btnMic").onclick=()=>{
+  if(!SR){say("このブラウザでは声が聞けないみたい");return;}
+  if(micOn){micOn=false;try{rec.stop();}catch(e){}$("btnMic").className="mic";$("btnMic").textContent="🎤 声で話しかける OFF";say("マイクはおしまい");return;}
+  rec=new SR();rec.lang="ja-JP";rec.continuous=true;rec.interimResults=false;
+  rec.onresult=e=>{const r=e.results[e.results.length-1];if(r.isFinal&&!speaking)handleSpeech(r[0].transcript);};
+  rec.onend=()=>{if(micOn&&!micPaused)setTimeout(()=>{try{rec.start();}catch(e){}},300);};
+  rec.onerror=e=>{if(e.error==="not-allowed"){micOn=false;$("btnMic").className="mic";$("btnMic").textContent="🎤 声で話しかける OFF";say("マイクがつかえないみたい");}};
+  micOn=true;$("btnMic").className="mic on";$("btnMic").textContent="🎤 聞いてるよ（ON）";
+  say("なあに？ ここに何があるかな、って聞いてね").then(()=>{try{rec.start();}catch(e){}});};
+</script>
+</body>
+</html>
