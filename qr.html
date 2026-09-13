@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>木村研 スマホアプリ QRコード一覧</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;background:#fff;color:#111;margin:0;padding:16px}
+  h1{font-size:1.5rem;text-align:center;margin:0 0 4px}
+  .sub{text-align:center;color:#555;font-size:.9rem;margin-bottom:16px}
+  h2.sec{font-size:1.1rem;border-left:6px solid #2563eb;padding-left:8px;margin:20px 0 10px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:18px;max-width:1100px;margin:0 auto}
+  .card{border:2px solid #333;border-radius:16px;padding:14px;text-align:center;page-break-inside:avoid;background:#fff}
+  .card h3{font-size:1.15rem;margin:0 0 6px}
+  .qr{display:flex;justify-content:center;margin:8px 0}
+  .desc{font-size:.9rem;color:#333;min-height:2.6em}
+  .url{font-size:.72rem;word-break:break-all;color:#555;margin-top:6px}
+  .url a{color:#2563eb}
+  button{margin-top:6px;padding:6px 12px;border:1px solid #888;border-radius:8px;background:#f3f4f6;font-size:.85rem;cursor:pointer}
+  @media print{button{display:none}.card{border-color:#000}body{padding:8px}}
+</style>
+</head>
+<body>
+<h1>📱 スマホで遊ぶ・使う アプリ一覧</h1>
+<div class="sub">QRコードをスマホのカメラで読むと、そのまま開きます（インストール不要）</div>
+
+<script>
+const SITES=[
+  {sec:"🤝 みんなで遊ぶ（目や耳が不自由でもOK）",base:"https://akimura753.github.io/AI_motion_game/",items:[
+    {file:"janken-com.html",title:"みんなのじゃんけん・あっちむいてほい",desc:"2台のスマホをつないで対戦。音声・振動・大きな絵で、見えなくても聞こえなくても遊べる"},
+    {file:"grid9.html",title:"なにがあるかな？カメラ",desc:"カメラを9マスに分けて、中にある物をこどもの声で教えてくれる。声で「ここに何があるかな」"},
+  ]},
+  {sec:"🧭 OKIMO（okimo-ede）",base:"https://akimura753.github.io/okimo-ede/",items:[
+    {file:"サガス.html",title:"サガス",desc:"探したい物をカメラで見つけて、音と振動で場所を教える"},
+    {file:"okimo_approach_v3u.html",title:"OKIMO approach v3u",desc:"目標物に近づくための誘導（最新版）"},
+    {file:"okimo_approach_v3b.html",title:"OKIMO approach v3b",desc:"目標物に近づくための誘導（b版）"},
+    {file:"okimo_count_v1u.html",title:"OKIMO count v1u",desc:"物の数をかぞえて読み上げる（最新版）"},
+    {file:"okimo_count_v1b.html",title:"OKIMO count v1b",desc:"物の数をかぞえて読み上げる（b版）"},
+    {file:"okimo-edge-navi-v8.html",title:"OKIMO edge navi v8",desc:"段差や縁をカメラで検出して知らせるナビ（最新版）"},
+  ]},
+  {sec:"🤖 AIと対戦するじゃんけん",base:"https://akimura753.github.io/AI_motion_game/",items:[
+    {file:"janken.html",title:"AIじゃんけん（基本）",desc:"手の形をカメラで認識してAIと対戦"},
+    {file:"janken_algo1.html",title:"アルゴリズム1",desc:"AIが手の動きを予測して出すスーパーモード付き"},
+    {file:"janken_algo2_finger.html",title:"finger版 v2",desc:"グー・チョキ・パーの認識を強化した版"},
+  ]},
+];
+for(const s of SITES){
+  const h=document.createElement("h2");h.className="sec";h.textContent=s.sec;document.body.appendChild(h);
+  const g=document.createElement("div");g.className="grid";document.body.appendChild(g);
+  for(const x of s.items){
+    const url=s.base+encodeURI(x.file),id="q"+Math.random().toString(36).slice(2);
+    const c=document.createElement("div");c.className="card";
+    c.innerHTML=`<h3>${x.title}</h3><div class="desc">${x.desc}</div><div class="qr" id="${id}"></div>
+      <div class="url"><a href="${url}">${url}</a></div><button onclick="navigator.clipboard.writeText('${url}')">URLをコピー</button>`;
+    g.appendChild(c);
+    new QRCode(document.getElementById(id),{text:url,width:180,height:180,correctLevel:QRCode.CorrectLevel.M});
+  }
+}
+</script>
+</body>
+</html>
