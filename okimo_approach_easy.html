@@ -211,54 +211,45 @@ function pattern(letter, gapUnits){
   return seq;
 }
 
-/* ===== USB 有線接続（WebUSB, Android Chrome）: Pico の USB シリアル(CDC)を直接つかむ ===== */
-const usb={dev:null,epIn:null,epOut:null,ctrlIf:null,dataIf:null,ok:false,rx:''};
+/* ===== USB 有線接続（Web Serial API, Android Chrome）: DTR/エンドポイントを自動処理 ===== */
+const usb={port:null,reader:null,writer:null,ok:false,rx:''};
 async function usbConnect(){
-  if(!navigator.usb){ setMsg('この端末のブラウザは WebUSB 非対応です（Android の Chrome を使ってください）'); return; }
+  if(!('serial' in navigator)){ setMsg('この端末は Web Serial 非対応です（Android の Chrome で HTTPS のページを開いてください）'); return; }
   try{
-    const dev=await navigator.usb.requestDevice({filters:[{vendorId:0x2E8A}]});   // Raspberry Pi
-    await dev.open(); if(dev.configuration===null) await dev.selectConfiguration(1);
-    // CDC ACM のデータIF（class 0x0A）から bulk IN/OUT を拾う。ctrlIf は通知IF（class 0x02）
-    usb.ctrlIf=usb.dataIf=usb.epOut=usb.epIn=null;
-    for(const itf of dev.configuration.interfaces){
-      for(const alt of itf.alternates){
-        if(alt.interfaceClass===0x02) usb.ctrlIf=itf.interfaceNumber;
-        if(alt.interfaceClass===0x0A){ usb.dataIf=itf.interfaceNumber;
-          for(const ep of alt.endpoints){ if(ep.type==='bulk'){ if(ep.direction==='out') usb.epOut=ep.endpointNumber; else usb.epIn=ep.endpointNumber; } } }
-      }
-    }
-    if(usb.dataIf==null || usb.epOut==null){ setMsg('CDCデータIFが見つかりません（MicroPython の USB が有効か確認）'); pcLogLine('IF ctrl='+usb.ctrlIf+' data='+usb.dataIf+' epOut='+usb.epOut+' epIn='+usb.epIn); return; }
-    if(usb.ctrlIf!=null){ try{ await dev.claimInterface(usb.ctrlIf); }catch(e){ pcLogLine('claim ctrl 失敗: '+e.message); } }
-    await dev.claimInterface(usb.dataIf);
-    // SET_LINE_CODING(0x20) 115200 8N1 と SET_CONTROL_LINE_STATE(0x22) DTR=1,RTS=1（0x03）。MicroPython は DTR で送信を受け付ける
-    try{ await dev.controlTransferOut({requestType:'class',recipient:'interface',request:0x20,value:0,index:usb.ctrlIf??usb.dataIf}, new Uint8Array([0x00,0xC2,0x01,0x00,0,0,8])); }catch(e){ pcLogLine('line coding 失敗: '+e.message); }
-    try{ await dev.controlTransferOut({requestType:'class',recipient:'interface',request:0x22,value:0x03,index:usb.ctrlIf??usb.dataIf}); }catch(e){ pcLogLine('DTR/RTS 失敗: '+e.message); }
-    usb.dev=dev; usb.ok=true; usbReadLoop();
-    dev.addEventListener?.('disconnect',()=>{ usb.ok=false; usb.dev=null; });
-    navigator.usb.addEventListener('disconnect',ev=>{ if(ev.device===usb.dev){ usb.ok=false; usb.dev=null; setMsg('USB が外れました'); } });
-    pcLogLine('接続 OK  dataIf='+usb.dataIf+' epOut='+usb.epOut+' epIn='+usb.epIn);
+    const port=await navigator.serial.requestPort();          // Pico を選ぶダイアログ
+    await port.open({baudRate:115200});                        // 速度以外は自動。DTR も自動で立つ
+    try{ await port.setSignals({dataTerminalReady:true, requestToSend:true}); }catch(e){ pcLogLine('setSignals: '+e.message); }
+    usb.port=port;
+    usb.writer=port.writable.getWriter();
+    usb.ok=true;
+    usbReadLoop();
+    pcLogLine('接続 OK（Web Serial, 115200）');
     await usbWrite('PING'); await usbWrite('REPORT 1'); setTimeout(()=>usbWrite('GET'),400);
     setMsg('USB 接続しました（Pico）。'); logEvent('usb connected',{event:'usb_connected'});
-  }catch(e){ usb.ok=false; setMsg('USB 接続できません: '+e.message); }
+    navigator.serial.addEventListener('disconnect',ev=>{ if(ev.target===usb.port){ usb.ok=false; setMsg('USB が外れました'); } });
+  }catch(e){ usb.ok=false; setMsg('USB 接続できません: '+e.message); pcLogLine('接続例外: '+e.message); }
 }
 async function usbWrite(line){
-  if(!usb.ok){ pcLogLine('未接続のため送れません: '+line); return false; }
-  try{
-    const r=await usb.dev.transferOut(usb.epOut, new TextEncoder().encode(line+'\n'));
-    if(r && (r.status!=='ok')) pcLogLine('送信 status='+r.status+' ('+line+')');
-    return true;
-  }
+  if(!usb.ok||!usb.writer){ pcLogLine('未接続のため送れません: '+line); return false; }
+  try{ await usb.writer.write(new TextEncoder().encode(line+'\n')); return true; }
   catch(e){ usb.ok=false; setMsg('USB 送信失敗: '+e.message); pcLogLine('送信例外: '+e.message+' ('+line+')'); return false; }
 }
 async function usbReadLoop(){
   const dec=new TextDecoder();
-  while(usb.ok){
-    try{
-      const r=await usb.dev.transferIn(usb.epIn,64);
-      usb.rx+=dec.decode(r.data); let i;
-      while((i=usb.rx.indexOf('\n'))>=0){ const line=usb.rx.slice(0,i).trim(); usb.rx=usb.rx.slice(i+1); if(line) usbLine(line); }
-    }catch(e){ usb.ok=false; break; }
-  }
+  try{
+    while(usb.ok && usb.port && usb.port.readable){
+      usb.reader=usb.port.readable.getReader();
+      try{
+        while(true){
+          const {value,done}=await usb.reader.read();
+          if(done) break;
+          if(value){ usb.rx+=dec.decode(value); let i;
+            while((i=usb.rx.indexOf('\n'))>=0){ const l=usb.rx.slice(0,i).trim(); usb.rx=usb.rx.slice(i+1); if(l) usbLine(l); } }
+        }
+      }catch(e){ pcLogLine('受信中断: '+e.message); }
+      finally{ try{ usb.reader.releaseLock(); }catch(e){} }
+    }
+  }catch(e){ usb.ok=false; }
 }
 
 /* ===== Pico 設定パネル ===== */
