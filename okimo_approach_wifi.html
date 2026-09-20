@@ -1,0 +1,139 @@
+<!DOCTYPE html><html lang="ja"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>OKIMO 人接近 EASY-S（Wi-Fi・Pico直結）</title>
+<style>
+:root{box-sizing:border-box;--fg:#111;--bg:#fff;--ac:#1a4d8f}
+*{box-sizing:border-box}
+body{font-family:system-ui,sans-serif;margin:0;padding:12px;color:var(--fg);background:var(--bg);font-size:16px}
+h1{font-size:1.15rem;margin:.2em 0}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
+button{font-size:1rem;padding:12px 16px;border:1px solid #888;border-radius:12px;background:#f3f4f6}
+button.primary{background:var(--ac);color:#fff;border-color:var(--ac)}
+video{width:100%;max-width:480px;border-radius:12px;background:#000;transform:scaleX(-1)}
+#status{font-size:1.1rem;font-weight:bold;margin:6px 0;min-height:1.4em}
+#dir{font-size:2rem;letter-spacing:.1em}
+.small{font-size:.8rem;color:#666}
+label{font-size:.9rem}
+input[type=number]{width:64px;font-size:1rem;padding:4px}
+#log{font-size:.75rem;color:#555;white-space:pre-wrap;max-height:6em;overflow:auto;border:1px solid #ddd;border-radius:8px;padding:6px;margin-top:8px}
+details{margin:8px 0;border:1px solid #ccc;border-radius:8px;padding:6px 10px}
+</style></head><body>
+<h1>OKIMO 人接近 EASY-S</h1>
+<p class="small">Pico(OKIMO)に接続した状態で使います。左=S(トトト)／正面=K(混在)／右=M(ツーツー)。接近すると2倍速。</p>
+<div class="row">
+  <button id="btnStart" class="primary">カメラ開始</button>
+  <button id="btnStop">停止</button>
+</div>
+<div id="status">待機中</div>
+<div id="dir"></div>
+<video id="video" playsinline muted></video>
+
+<details><summary>設定</summary>
+  <div class="row"><label>Pico アドレス <input id="picoUrl" type="text" value="http://192.168.4.1" style="width:180px"></label>
+    <button id="btnPing">接続テスト</button></div>
+  <div class="row"><label>左右のしきい値（中央からの割合 %） <input id="sideTh" type="number" value="20" min="5" max="45"></label></div>
+  <div class="row"><label>接近と判定する肩幅の拡大率（％） <input id="nearTh" type="number" value="130" min="105" max="300"></label></div>
+  <div class="row"><label>再送の間隔（秒） <input id="repeatSec" type="number" value="3" min="1" max="10" step="0.5"></label></div>
+  <div class="row"><button id="btnTestL">試 左S</button><button id="btnTestC">試 正面K</button><button id="btnTestR">試 右M</button></div>
+</details>
+<div id="log"></div>
+
+<script type="module">
+import { FilesetResolver, PoseLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+const $=id=>document.getElementById(id);
+const log=t=>{$("log").textContent=(new Date().toLocaleTimeString()+" "+t+"\n"+$("log").textContent).split("\n").slice(0,40).join("\n")};
+
+let landmarker=null, running=false, raf=0;
+let baseShoulder=null;           // 初期の肩幅（接近判定の基準）
+let lastKey=null, lastSent=0;
+
+const picoUrl=()=>$("picoUrl").value.replace(/\/+$/,"");
+async function pico(path){
+  try{ const r=await fetch(picoUrl()+path,{cache:"no-store"}); return (await r.text()).trim(); }
+  catch(e){ log("送信失敗: "+e.message+" ("+path+")"); return null; }
+}
+$("btnPing").onclick=async()=>{ const r=await pico("/ping"); log("ping -> "+(r||"応答なし")); };
+$("btnTestL").onclick=()=>pico("/z?d=L");
+$("btnTestC").onclick=()=>pico("/z?d=C");
+$("btnTestR").onclick=()=>pico("/z?d=R");
+
+async function initModel(){
+  if(landmarker) return;
+  $("status").textContent="モデル読み込み中…（初回のみ通信）";
+  const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
+  const opts=d=>({baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",delegate:d},runningMode:"VIDEO",numPoses:1,minPoseDetectionConfidence:.5,minTrackingConfidence:.5});
+  try{ landmarker=await PoseLandmarker.createFromOptions(vision,opts("GPU")); }
+  catch(e){ landmarker=await PoseLandmarker.createFromOptions(vision,opts("CPU")); }
+  log("モデル準備OK");
+}
+
+async function start(){
+  await initModel();
+  const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
+  $("video").srcObject=st; await $("video").play();
+  running=true; baseShoulder=null; $("status").textContent="検出中…";
+  loop();
+}
+function stop(){
+  running=false; cancelAnimationFrame(raf);
+  const v=$("video"); if(v.srcObject){ v.srcObject.getTracks().forEach(t=>t.stop()); v.srcObject=null; }
+  $("status").textContent="停止"; $("dir").textContent=""; pico("/stop");
+}
+$("btnStart").onclick=()=>start().catch(e=>{$("status").textContent="開始できません: "+e.message;log(e.message)});
+$("btnStop").onclick=stop;
+
+function decide(lm){
+  // 鼻(0)の左右位置で方向、肩(11,12)の幅で接近を判定
+  const nose=lm[0], ls=lm[11], rs=lm[12];
+  if(!nose||!ls||!rs) return null;
+  const cx=(ls.x+rs.x)/2;                 // 体の中心x（0..1、鏡像でも相対で可）
+  const off=(cx-0.5)*100;                 // 中央からのずれ（％）※-左 +右（カメラ座標）
+  const th=+$("sideTh").value;
+  // 画面は鏡像表示だが座標は元のまま。人から見た左右に合わせるため符号反転
+  let zone="C";
+  if(off> th) zone="L"; else if(off< -th) zone="R";
+  const shoulder=Math.abs(ls.x-rs.x);     // 肩幅（0..1）
+  if(baseShoulder===null) baseShoulder=shoulder;
+  const ratio=shoulder/baseShoulder*100;
+  const near=ratio >= +$("nearTh").value;
+  return {zone,near,ratio};
+}
+
+async function send(zone,near){
+  const now=performance.now();
+  const key=zone+(near?"F":"");
+  const rep=(+$("repeatSec").value)*1000;
+  if(key!==lastKey || now-lastSent>=rep){
+    lastKey=key; lastSent=now;
+    await pico("/z?d="+zone+(near?"&fast=1":""));
+    log("送信 "+zone+(near?" 接近(2倍速)":""));
+  }
+}
+
+async function loop(){
+  if(!running) return;
+  const v=$("video");
+  if(v.readyState>=2 && landmarker){
+    const res=landmarker.detectForVideo(v, performance.now());
+    if(res.landmarks && res.landmarks.length){
+      const d=decide(res.landmarks[0]);
+      if(d){
+        const name={L:"左 S ・・・",C:"正面 K －・－",R:"右 M －－"}[d.zone];
+        $("dir").textContent=name+(d.near?"  ←接近":"");
+        $("status").textContent="検出中  肩幅比 "+Math.round(d.ratio)+"%";
+        send(d.zone, d.near);
+      }
+    }else{
+      $("dir").textContent=""; $("status").textContent="人を探しています…"; lastKey=null;
+    }
+  }
+  raf=requestAnimationFrame(loop);
+}
+
+// Service Worker（ページ・WASM・モデルをキャッシュ→当日オフライン動作）
+if("serviceWorker" in navigator){
+  navigator.serviceWorker.register("okimo_sw.js").then(()=>log("SW登録")).catch(e=>log("SW失敗:"+e.message));
+}
+</script>
+</body></html>
