@@ -45,12 +45,14 @@ details{margin:8px 0;border:1px solid #ccc;border-radius:8px;padding:6px 10px}
 
 <details><summary>設定</summary>
   <div class="row"><label>Pico アドレス <input id="picoUrl" type="text" value="http://192.168.4.1" style="width:180px"></label></div>
-  <div class="row"><label class="tog"><input type="checkbox" id="tglVoice" checked> 音声で知らせる（ひだり ひと 等）</label></div>
+  <div class="row"><label class="tog"><input type="checkbox" id="tglVoice" checked> 方向を音声で知らせる（ひだり ひと／せっきん）</label></div>
   <div class="row"><label class="tog"><input type="checkbox" id="tglBone"> 骨伝導に低音モールスも出す</label>
     <label>低音Hz <input id="boneHz" type="number" value="200" min="80" max="500"></label></div>
   <div class="row"><label class="tog"><input type="checkbox" id="tglFaceVoice" checked> 顔の向きを音声で言う</label></div>
+  <div class="row"><label class="tog"><input type="checkbox" id="tglFlip"> 左右を入れ替える（逆に感じるときON）</label></div>
   <div class="row"><label>接近と判定する肩幅の拡大率(％) <input id="nearTh" type="number" value="130" min="105" max="300"></label></div>
   <div class="row"><label>再送の間隔(秒) <input id="repeatSec" type="number" value="3" min="1" max="10" step="0.5"></label></div>
+  <div class="row"><label>音声の最小間隔(秒) <input id="voiceGap" type="number" value="2.5" min="0.5" max="8" step="0.5"></label></div>
   <div class="row"><button id="tL">試 左S</button><button id="tC">試 前K</button><button id="tR">試 右M</button></div>
 </details>
 <div id="log"></div>
@@ -72,9 +74,15 @@ $("btnPico").onclick=async()=>{ const r=await pico("/ping"); log("ping -> "+(r||
 $("tL").onclick=()=>pico("/z?d=L"); $("tC").onclick=()=>pico("/z?d=C"); $("tR").onclick=()=>pico("/z?d=R");
 
 /* ---------- 音声（TTS） ---------- */
+let _lastSayT=0, _lastSayText="";
 function say(text){
   if(!$("tglVoice").checked) return;
-  try{ const u=new SpeechSynthesisUtterance(text); u.lang="ja-JP"; u.rate=1.05; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch(e){}
+  const now=performance.now();
+  const gap=(+($("voiceGap").value||2))*1000;      // 音声の最小間隔（秒→ms）
+  if(text===_lastSayText && now-_lastSayT<gap) return;  // 同じ内容の連発を抑制
+  if(now-_lastSayT<gap && speechSynthesis.speaking) return; // 前の音声が続いている間は出さない
+  _lastSayT=now; _lastSayText=text;
+  try{ const u=new SpeechSynthesisUtterance(text); u.lang="ja-JP"; u.rate=1.05; speechSynthesis.speak(u);}catch(e){}
 }
 function sayFace(text){
   if(!$("tglFaceVoice").checked) return;
@@ -105,7 +113,7 @@ function morseTone(letter, speed){
 
 /* ---------- カメラ・判定 ---------- */
 let landmarker=null, running=false, raf=0;
-let baseShoulder=null, lastKey=null, lastSent=0, lastLm=null;
+let lastKey=null, lastSent=0, lastLm=null;
 
 async function initModel(){
   if(landmarker) return;
@@ -121,7 +129,7 @@ async function start(){
   try{ actx=actx||new (window.AudioContext||window.webkitAudioContext)(); if(actx.state==="suspended") actx.resume(); }catch(e){}
   const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
   $("video").srcObject=st; await $("video").play();
-  running=true; baseShoulder=null; $("status").textContent="検出中…"; loop();
+  running=true; baseSize=null; prevSize=null; $("status").textContent="検出中…"; loop();
 }
 function stop(){
   running=false; cancelAnimationFrame(raf);
@@ -140,7 +148,8 @@ function drawOverlay(zone){
   g.beginPath(); g.moveTo(c.width/3,0); g.lineTo(c.width/3,c.height);
   g.moveTo(c.width*2/3,0); g.lineTo(c.width*2/3,c.height); g.stroke();
   if(zone){ // 該当枠を強調（表示は鏡像なので左右入替）
-    const idx={L:2,C:1,R:0}[zone]; // 人の左=画面右(鏡像)
+    let idx={L:0,C:1,R:2}[zone];
+    if($("tglFlip").checked) idx=2-idx;
     g.fillStyle="rgba(26,77,143,.18)"; g.fillRect(c.width*idx/3,0,c.width/3,c.height);
   }
 }
@@ -149,11 +158,15 @@ function drawOverlay(zone){
 function faceDir(lm){
   const nose=lm[0], le=lm[2], re=lm[5];
   if(!nose||!le||!re) return null;
-  const mid=(le.x+re.x)/2, span=Math.abs(le.x-re.x)+1e-6;
-  const r=(nose.x-mid)/span;               // +で画面右、-で画面左（カメラ座標）
-  // カメラ座標→人から見た向き（反転）。閾値0.15
-  if(r> 0.15) return "みぎむき";
-  if(r< -0.15) return "ひだりむき";
+  const midx=(le.x+re.x)/2, midy=(le.y+re.y)/2, span=Math.abs(le.x-re.x)+1e-6;
+  const rx=(nose.x-midx)/span;             // 左右：+で画面右
+  const ry=(nose.y-midy)/span;             // 上下：鼻が目より下(+)か上(-)か
+  const flip=$("tglFlip").checked;
+  // 上下を優先しすぎないよう、左右の傾きが小さいときだけ上下を見る
+  if(ry> 1.2) return "したむき";
+  if(ry< 0.15) return "うわむき";
+  if(rx> 0.15) return flip? "みぎむき":"ひだりむき";
+  if(rx< -0.15) return flip? "ひだりむき":"みぎむき";
   return "まえむき";
 }
 function boneTest(){
@@ -179,24 +192,38 @@ function decide(lm){
   const ls=lm[11], rs=lm[12]; if(!ls||!rs) return null;
   const cx=(ls.x+rs.x)/2;                    // 0..1 カメラ座標
   // カメラ座標の左(0)は、鏡像でない実空間では人の右。人から見た左右に合わせる：
-  const px=1-cx;                              // 反転して「人から見た」位置に
+  let px=cx; if($("tglFlip").checked) px=1-px;   // 左右入れ替えトグル
   let zone = px<1/3 ? "L" : (px<2/3 ? "C" : "R");
+  // 大きさの指標＝肩幅と目間距離のうち、信頼できるものを採用（大きいほど近い）
   const shoulder=Math.abs(ls.x-rs.x);
-  if(baseShoulder===null) baseShoulder=shoulder;
-  const ratio=shoulder/baseShoulder*100;
+  const le=lm[2], re=lm[5];
+  const eye=(le&&re)?Math.abs(le.x-re.x):null;
+  // 肩幅と目間を正規化して合成（目間は肩幅の約1/3なので3倍して尺度を合わせる）
+  const size = eye!=null ? Math.max(shoulder, eye*3) : shoulder;
+  if(baseSize===null) baseSize=size;
+  const ratio=size/baseSize*100;
   const near=ratio >= +$("nearTh").value;
-  return {zone,near,ratio};
+  // 直前の大きさと比較して「増加中＝接近」「ほぼ一定＝静止」
+  let approaching=false;
+  if(prevSize!==null){
+    const dz=(size-prevSize)/(prevSize+1e-6);
+    approaching = dz > 0.03;
+  }
+  prevSize=size;
+  return {zone,near,ratio,approaching};
 }
+let prevSize=null, baseSize=null;
 
 const KANA={L:"ひだり",C:"まえ",R:"みぎ"}, LET={L:"S",C:"K",R:"M"};
-async function fire(zone,near){
-  const now=performance.now(), key=zone+(near?"F":""), rep=(+$("repeatSec").value)*1000;
+async function fire(zone,near,approaching){
+  const fast = near || approaching;                      // 接近中は2倍速
+  const now=performance.now(), key=zone+(fast?"F":"S"), rep=(+$("repeatSec").value)*1000;
   if(key!==lastKey || now-lastSent>=rep){
     lastKey=key; lastSent=now;
-    await pico("/z?d="+zone+(near?"&fast=1":""));       // 通電
-    morseTone(LET[zone], near?2:1);                      // 骨伝導 低音モールス
-    say(KANA[zone]+" "+(near?"せっきん":"ひと"));        // 音声
-    log("送信 "+KANA[zone]+(near?" 接近(2倍速)":""));
+    await pico("/z?d="+zone+(fast?"&fast=1":""));         // 通電
+    morseTone(LET[zone], fast?2:1);                       // 骨伝導 低音モールス
+    say(KANA[zone]+" "+(fast?"せっきん":"せいし"));       // 音声：接近 or 静止中
+    log("送信 "+KANA[zone]+(fast?" 接近(2倍速)":" 静止"));
   }
 }
 async function loop(){
@@ -210,9 +237,9 @@ async function loop(){
       if(d){
         $("dir").textContent=KANA[d.zone]+" "+LET[d.zone]+(d.near?"  ←接近":"");
         $("status").textContent="検出中  肩幅比 "+Math.round(d.ratio)+"%";
-        drawOverlay(d.zone); fire(d.zone,d.near);
+        drawOverlay(d.zone); fire(d.zone,d.near,d.approaching);
       }
-    }else{ lastLm=null; $("dir").textContent=""; $("status").textContent="人を探しています…"; lastKey=null; drawOverlay(null); }
+    }else{ lastLm=null; prevSize=null; baseSize=null; $("dir").textContent=""; $("status").textContent="人を探しています…"; lastKey=null; drawOverlay(null); }
   }
   raf=requestAnimationFrame(loop);
 }
