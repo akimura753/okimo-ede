@@ -1,0 +1,197 @@
+<!DOCTYPE html><html lang="ja"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>OKIMO カウント（Wi-Fi・YOLO・数字モールス）</title>
+<style>
+:root{box-sizing:border-box}*{box-sizing:border-box}
+body{font-family:system-ui,sans-serif;margin:0;padding:12px;color:#111;background:#fff;font-size:16px}
+h1{font-size:1.15rem;margin:.2em 0}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
+button{font-size:1rem;padding:12px 16px;border:1px solid #888;border-radius:12px;background:#f3f4f6}
+button.primary{background:#1a4d8f;color:#fff;border-color:#1a4d8f}
+video{width:100%;max-width:480px;border-radius:12px;background:#000}
+canvas{display:none}
+#status{font-size:1.05rem;font-weight:bold;margin:6px 0;min-height:1.4em}
+#count{font-size:2.4rem}
+.small{font-size:.8rem;color:#666}
+label{font-size:.9rem}input[type=number]{width:64px;font-size:1rem;padding:4px}
+.tog{display:inline-flex;align-items:center;gap:4px}
+video.flip{transform:scaleX(-1)}
+#log{font-size:.75rem;color:#555;white-space:pre-wrap;max-height:6em;overflow:auto;border:1px solid #ddd;border-radius:8px;padding:6px;margin-top:8px}
+details{margin:8px 0;border:1px solid #ccc;border-radius:8px;padding:6px 10px}
+</style></head><body>
+<h1>OKIMO カウント（人数）</h1>
+<p class="small">Pico(OKIMO)に接続した状態で使います。人数を数字モールスで腰に伝えます（2回繰り返し）。</p>
+<div class="row">
+  <button id="btnStart" class="primary">カメラ開始</button>
+  <button id="btnStop">停止</button>
+  <button id="btnNow">今何人？（再送）</button>
+</div>
+<div id="status">待機中</div>
+<div id="count"></div>
+<video id="video" playsinline muted></video>
+<canvas id="cv" width="640" height="640"></canvas>
+
+<details><summary>設定</summary>
+  <div class="row"><label>Pico アドレス <input id="picoUrl" type="text" value="http://192.168.4.1" style="width:180px"></label>
+    <button id="btnPing">接続テスト</button></div>
+  <div class="row"><label class="tog"><input type="checkbox" id="tglFlip"> 左右を入れ替える（検出の左右も反転）</label></div>
+  <div class="row"><label class="tog"><input type="checkbox" id="tglBone"> 骨伝導に低音モールスも出す</label>
+    <label>低音Hz <input id="boneHz" type="number" value="200" min="80" max="500"></label>
+    <button id="btnBoneTest">骨伝導テスト音</button></div>
+  <div class="row"><label>検出のしきい値（信頼度 0〜1） <input id="conf" type="number" value="0.45" min="0.1" max="0.9" step="0.05"></label></div>
+  <div class="row"><label>判定を確定する秒数 <input id="holdSec" type="number" value="1.5" min="0.5" max="5" step="0.5"></label></div>
+  <div class="row"><label>推論の間隔（ミリ秒・大きいほど軽い） <input id="everyMs" type="number" value="200" min="66" max="1000" step="33"></label></div>
+  <div class="row"><button id="btnTest1">試1人</button><button id="btnTest2">試2人</button><button id="btnTest3">試3人</button></div>
+</details>
+<div id="log"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
+<script type="module">
+const $=id=>document.getElementById(id);
+const log=t=>{$("log").textContent=(new Date().toLocaleTimeString()+" "+t+"\n"+$("log").textContent).split("\n").slice(0,40).join("\n")};
+
+const MODEL="yolov8n_int8.onnx", IMG=640, PERSON=0;
+let sess=null, running=false, raf=0, lastInfer=0;
+let stableKey=null, candKey=null, candSince=0, stableLR=null, sending=false;
+
+const picoUrl=()=>$("picoUrl").value.replace(/\/+$/,"");
+$("tglFlip").addEventListener("change",()=>{ $("video").classList.toggle("flip",$("tglFlip").checked); });
+async function pico(path){
+  try{const r=await fetch(picoUrl()+path,{cache:"no-store"});return (await r.text()).trim();}
+  catch(e){log("送信失敗:"+e.message);return null;}
+}
+$("btnPing").onclick=async()=>log("ping -> "+(await pico("/ping")||"応答なし"));
+$("btnTest1").onclick=()=>pico("/count?n=1");
+$("btnTest2").onclick=()=>pico("/count?n=2");
+$("btnTest3").onclick=()=>pico("/count?n=3");
+$("btnNow").onclick=()=>{ if(stableLR){ sendLR(stableLR.l, stableLR.r); } };
+
+let actx=null;
+const DIGITS={'0':'-----','1':'.----','2':'..---','3':'...--','4':'....-','5':'.....','6':'-....','7':'--...','8':'---..','9':'----.'};
+function morseCount(n){
+  if(!$("tglBone").checked) return;
+  if(!actx){ try{actx=new (window.AudioContext||window.webkitAudioContext)();}catch(e){return;} }
+  if(actx.state==="suspended") actx.resume();
+  const code=DIGITS[String(n)]||""; const dot=0.25, hz=+$("boneHz").value; let t=actx.currentTime+0.05;
+  for(let r=0;r<2;r++){                      // 2回繰り返し（Picoと同じ）
+    for(let i=0;i<code.length;i++){
+      const on=(code[i]==="-"?dot*3:dot);
+      const o=actx.createOscillator(), g=actx.createGain();
+      o.type="sine"; o.frequency.value=hz; o.connect(g); g.connect(actx.destination);
+      g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.6,t+0.01);
+      g.gain.setValueAtTime(0.6,t+on-0.01); g.gain.linearRampToValueAtTime(0,t+on);
+      o.start(t); o.stop(t+on+0.01); t+=on+dot;
+    }
+    t+=dot*3;
+  }
+}
+function boneTest(){
+  try{ if(!actx) actx=new (window.AudioContext||window.webkitAudioContext)(); if(actx.state==="suspended") actx.resume(); }catch(e){ log("音声出力を開始できません"); return; }
+  const hz=+$("boneHz").value; let t=actx.currentTime+0.05; const seq=[0.2,0.2,0.2,0.6];
+  for(let i=0;i<seq.length;i++){ const o=actx.createOscillator(), g=actx.createGain();
+    o.type="sine"; o.frequency.value=hz; o.connect(g); g.connect(actx.destination);
+    g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.6,t+0.01);
+    g.gain.setValueAtTime(0.6,t+seq[i]-0.01); g.gain.linearRampToValueAtTime(0,t+seq[i]);
+    o.start(t); o.stop(t+seq[i]+0.01); t+=seq[i]+0.15; }
+  log("骨伝導テスト音（"+hz+"Hz）");
+}
+$("btnBoneTest").onclick=boneTest;
+
+async function initModel(){
+  if(sess) return;
+  if(typeof ort==="undefined" || !ort.InferenceSession){ throw new Error("onnxruntime(ort)が読み込めていません。ネット接続を確認してください"); }
+  $("status").textContent="モデル読み込み中…（初回のみ通信）";
+  ort.env.wasm.wasmPaths="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/";
+  ort.env.wasm.numThreads=1;   // 端末差の安定化（SharedArrayBuffer不要に）
+  sess=await ort.InferenceSession.create(MODEL,{executionProviders:["wasm"]});
+  log("YOLOモデル準備OK");
+}
+
+async function start(){
+  await initModel();
+  const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
+  $("video").srcObject=st; await $("video").play();
+  running=true; stableN=null; lastSentN=null; $("status").textContent="検出中…"; loop();
+}
+function stop(){
+  running=false; cancelAnimationFrame(raf);
+  const v=$("video"); if(v.srcObject){v.srcObject.getTracks().forEach(t=>t.stop());v.srcObject=null;}
+  $("status").textContent="停止"; $("count").textContent="";
+}
+$("btnStart").onclick=()=>start().catch(e=>{$("status").textContent="開始できません:"+e.message;log(e.message)});
+$("btnStop").onclick=stop;
+
+const cv=$("cv"), ctx=cv.getContext("2d",{willReadFrequently:true});
+function preprocess(v){
+  // letterbox 640x640
+  const iw=v.videoWidth, ih=v.videoHeight, s=Math.min(IMG/iw,IMG/ih);
+  const nw=Math.round(iw*s), nh=Math.round(ih*s), dx=(IMG-nw)/2, dy=(IMG-nh)/2;
+  ctx.fillStyle="#727272"; ctx.fillRect(0,0,IMG,IMG);
+  ctx.drawImage(v,0,0,iw,ih,dx,dy,nw,nh);
+  const d=ctx.getImageData(0,0,IMG,IMG).data;
+  const f=new Float32Array(IMG*IMG*3);
+  for(let i=0,p=0;i<IMG*IMG;i++,p+=4){ f[i]=d[p]/255; f[i+IMG*IMG]=d[p+1]/255; f[i+2*IMG*IMG]=d[p+2]/255; }
+  return new ort.Tensor("float32",f,[1,3,IMG,IMG]);
+}
+function countPersons(out, conf){
+  // YOLOv8 output [1,84,8400] : 4 box + 80 cls。person=index0
+  const data=out.data, dims=out.dims; const na=dims[2];
+  const boxes=[];
+  for(let a=0;a<na;a++){
+    const sc=data[(4+PERSON)*na+a];
+    if(sc>=conf){
+      const cx=data[0*na+a], cy=data[1*na+a], w=data[2*na+a], h=data[3*na+a];
+      boxes.push([cx-w/2,cy-h/2,cx+w/2,cy+h/2,sc,cx]);   // cx(中心x, 0..640)も保持
+    }
+  }
+  boxes.sort((a,b)=>b[4]-a[4]); const keep=[];
+  const iou=(A,B)=>{const x1=Math.max(A[0],B[0]),y1=Math.max(A[1],B[1]),x2=Math.min(A[2],B[2]),y2=Math.min(A[3],B[3]);
+    const w=Math.max(0,x2-x1),h=Math.max(0,y2-y1),inter=w*h;const aA=(A[2]-A[0])*(A[3]-A[1]),aB=(B[2]-B[0])*(B[3]-B[1]);return inter/(aA+aB-inter+1e-6);};
+  for(const b of boxes){ if(keep.every(k=>iou(k,b)<0.45)) keep.push(b); }
+  // 左右に振り分け（画像中心 IMG/2 基準）。反転トグルで左右入替
+  let left=0,right=0; const flip=$("tglFlip").checked;
+  for(const b of keep){ const isLeft=(b[5] < IMG/2); const L = flip? !isLeft : isLeft; if(L) left++; else right++; }
+  return {left,right,total:keep.length};
+}
+
+async function loop(){
+  if(!running) return;
+  const v=$("video"), now=performance.now();
+  if(v.readyState>=2 && sess && now-lastInfer>=(+$("everyMs").value)){
+    lastInfer=now;
+    try{
+      const t=preprocess(v);
+      const res=await sess.run({images:t});
+      const out=res[Object.keys(res)[0]];
+      const c=countPersons(out, +$("conf").value);
+      const key=c.left+"-"+c.right;
+      $("count").textContent="左 "+c.left+" ／ 右 "+c.right+" 人";
+      if(key===candKey){ if(now-candSince>=(+$("holdSec").value)*1000 && key!==stableKey){ stableKey=key; stableLR={l:c.left,r:c.right}; onStable(c.left,c.right); } }
+      else { candKey=key; candSince=now; }
+      $("status").textContent="検出中（確定 "+(stableKey==null?"—":stableKey.replace("-"," / "))+"）";
+    }catch(e){ log("推論エラー:"+e.message); }
+  }
+  raf=requestAnimationFrame(loop);
+}
+function say(t){ try{const u=new SpeechSynthesisUtterance(t);u.lang="ja-JP";speechSynthesis.speak(u);}catch(e){} }
+async function sendLR(left,right){
+  if(sending) return; sending=true;
+  try{
+    // 左
+    say("ひだり "+left+"にん");
+    if(left>=1&&left<=9){ await pico("/count?n="+left); morseCount(left); }
+    await new Promise(r=>setTimeout(r, 2200));
+    // 右
+    say("みぎ "+right+"にん");
+    if(right>=1&&right<=9){ await pico("/count?n="+right); morseCount(right); }
+    log("送信 左"+left+"・右"+right);
+  } finally { sending=false; }
+}
+async function onStable(left,right){ await sendLR(left,right); }
+
+if("serviceWorker" in navigator){
+  navigator.serviceWorker.register("okimo_sw.js").then(()=>log("SW登録")).catch(e=>log("SW失敗:"+e.message));
+}
+</script>
+</body></html>
