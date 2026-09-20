@@ -1,0 +1,251 @@
+<!DOCTYPE html><html lang="ja"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>OKIMO 人接近 EASY-SR（Wi-Fi・Pico直結）</title>
+<style>
+:root{box-sizing:border-box;--ac:#1a4d8f}*{box-sizing:border-box}
+body{font-family:system-ui,sans-serif;margin:0;padding:12px;color:#111;background:#fff;font-size:16px}
+h1{font-size:1.15rem;margin:.2em 0}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
+button{font-size:1rem;padding:12px 16px;border:1px solid #888;border-radius:12px;background:#f3f4f6}
+button.primary{background:var(--ac);color:#fff;border-color:var(--ac)}
+button.big{font-size:1.2rem;padding:16px 22px}
+.wrap{position:relative;max-width:480px}
+video{width:100%;border-radius:12px;background:#000;transform:scaleX(-1)}
+#overlay{position:absolute;inset:0;pointer-events:none;width:100%;height:100%}
+#status{font-size:1.05rem;font-weight:bold;margin:6px 0;min-height:1.4em}
+#dir{font-size:1.8rem}
+.small{font-size:.8rem;color:#666}
+label{font-size:.9rem}
+#pico{font-weight:bold}
+#log{font-size:.75rem;color:#555;white-space:pre-wrap;max-height:6em;overflow:auto;border:1px solid #ddd;border-radius:8px;padding:6px;margin-top:8px}
+details{margin:8px 0;border:1px solid #ccc;border-radius:8px;padding:6px 10px}
+.tog{display:inline-flex;align-items:center;gap:4px}
+</style></head><body>
+<h1>OKIMO 人接近 EASY-SR</h1>
+<p class="small">Pico(OKIMO)に接続して使う。左=S(トトト)／前=K(混在)／右=M(ツーツー)。接近で2倍速。</p>
+
+<div class="row">
+  <span id="pico">Pico: 未接続</span>
+  <button id="btnPico">Pico 接続テスト</button>
+</div>
+<div class="row">
+  <button id="btnStart" class="primary big">カメラ開始</button>
+  <button id="btnStop">停止</button>
+  <button id="btnFace" class="big">顔の向き</button>
+  <button id="btnBoneTest">骨伝導テスト音</button>
+</div>
+
+<div id="status">待機中</div>
+<div id="dir"></div>
+<div class="wrap">
+  <video id="video" playsinline muted></video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<details><summary>設定</summary>
+  <div class="row"><label>Pico アドレス <input id="picoUrl" type="text" value="http://192.168.4.1" style="width:180px"></label></div>
+  <div class="row"><label class="tog"><input type="checkbox" id="tglVoice" checked> 方向を音声で知らせる（ひだり ひと／せっきん）</label></div>
+  <div class="row"><label class="tog"><input type="checkbox" id="tglBone"> 骨伝導に低音モールスも出す</label>
+    <label>低音Hz <input id="boneHz" type="number" value="200" min="80" max="500"></label></div>
+  <div class="row"><label class="tog"><input type="checkbox" id="tglFaceVoice" checked> 顔の向きを音声で言う</label></div>
+  <div class="row"><label class="tog"><input type="checkbox" id="tglFlip"> 左右を入れ替える（逆に感じるときON）</label></div>
+  <div class="row"><label>接近と判定する肩幅の拡大率(％) <input id="nearTh" type="number" value="130" min="105" max="300"></label></div>
+  <div class="row"><label>再送の間隔(秒) <input id="repeatSec" type="number" value="3" min="1" max="10" step="0.5"></label></div>
+  <div class="row"><label>音声の最小間隔(秒) <input id="voiceGap" type="number" value="2.5" min="0.5" max="8" step="0.5"></label></div>
+  <div class="row"><button id="tL">試 左S</button><button id="tC">試 前K</button><button id="tR">試 右M</button></div>
+</details>
+<div id="log"></div>
+
+<script type="module">
+import { FilesetResolver, PoseLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest";
+const $=id=>document.getElementById(id);
+const log=t=>{$("log").textContent=(new Date().toLocaleTimeString()+" "+t+"\n"+$("log").textContent).split("\n").slice(0,40).join("\n")};
+
+/* ---------- Pico 通信 ---------- */
+const picoUrl=()=>$("picoUrl").value.replace(/\/+$/,"");
+let picoOK=false;
+async function pico(path){
+  try{ const r=await fetch(picoUrl()+path,{cache:"no-store"}); const t=(await r.text()).trim();
+    if(!picoOK){ picoOK=true; $("pico").textContent="Pico: 接続OK"; } return t; }
+  catch(e){ picoOK=false; $("pico").textContent="Pico: 未接続"; log("送信失敗:"+e.message); return null; }
+}
+$("btnPico").onclick=async()=>{ const r=await pico("/ping"); log("ping -> "+(r||"応答なし")); };
+$("tL").onclick=()=>pico("/z?d=L"); $("tC").onclick=()=>pico("/z?d=C"); $("tR").onclick=()=>pico("/z?d=R");
+
+/* ---------- 音声（TTS） ---------- */
+let _lastSayT=0, _lastSayText="";
+function say(text){
+  if(!$("tglVoice").checked) return;
+  const now=performance.now();
+  const gap=(+($("voiceGap").value||2))*1000;      // 音声の最小間隔（秒→ms）
+  if(text===_lastSayText && now-_lastSayT<gap) return;  // 同じ内容の連発を抑制
+  if(now-_lastSayT<gap && speechSynthesis.speaking) return; // 前の音声が続いている間は出さない
+  _lastSayT=now; _lastSayText=text;
+  try{ const u=new SpeechSynthesisUtterance(text); u.lang="ja-JP"; u.rate=1.05; speechSynthesis.speak(u);}catch(e){}
+}
+function sayFace(text){
+  if(!$("tglFaceVoice").checked) return;
+  try{ const u=new SpeechSynthesisUtterance(text); u.lang="ja-JP"; speechSynthesis.speak(u);}catch(e){}
+}
+
+/* ---------- 骨伝導の低音モールス（WebAudio） ---------- */
+let actx=null;
+function morseTone(letter, speed){
+  if(!$("tglBone").checked) return;
+  if(!actx){ try{actx=new (window.AudioContext||window.webkitAudioContext)();}catch(e){return;} }
+  const MAP={S:"...",K:"-.-",M:"--"}; const code=MAP[letter]||"-.-";
+  const dot=0.25/speed, hz=+$("boneHz").value;
+  let t=actx.currentTime+0.02;
+  for(let r=0;r<2;r++){
+    for(let i=0;i<code.length;i++){
+      const on=(code[i]==="-"?dot*3:dot);
+      const o=actx.createOscillator(), g=actx.createGain();
+      o.type="sine"; o.frequency.value=hz; o.connect(g); g.connect(actx.destination);
+      g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.6,t+0.01);
+      g.gain.setValueAtTime(0.6,t+on-0.01); g.gain.linearRampToValueAtTime(0,t+on);
+      o.start(t); o.stop(t+on+0.01);
+      t+=on+dot;
+    }
+    t+=dot*2;
+  }
+}
+
+/* ---------- カメラ・判定 ---------- */
+let landmarker=null, running=false, raf=0;
+let lastKey=null, lastSent=0, lastLm=null;
+
+async function initModel(){
+  if(landmarker) return;
+  $("status").textContent="モデル読み込み中…（初回のみ通信）";
+  const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
+  const opts=d=>({baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",delegate:d},runningMode:"VIDEO",numPoses:1,minPoseDetectionConfidence:.5,minTrackingConfidence:.5});
+  try{ landmarker=await PoseLandmarker.createFromOptions(vision,opts("GPU")); }
+  catch(e){ landmarker=await PoseLandmarker.createFromOptions(vision,opts("CPU")); }
+  log("モデル準備OK");
+}
+async function start(){
+  await initModel();
+  try{ actx=actx||new (window.AudioContext||window.webkitAudioContext)(); if(actx.state==="suspended") actx.resume(); }catch(e){}
+  const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
+  $("video").srcObject=st; await $("video").play();
+  running=true; baseSize=null; prevSize=null; $("status").textContent="検出中…"; loop();
+}
+function stop(){
+  running=false; cancelAnimationFrame(raf);
+  const v=$("video"); if(v.srcObject){ v.srcObject.getTracks().forEach(t=>t.stop()); v.srcObject=null; }
+  $("status").textContent="停止"; $("dir").textContent=""; pico("/stop");
+}
+$("btnStart").onclick=()=>start().catch(e=>{$("status").textContent="開始できません: "+e.message;log(e.message)});
+$("btnStop").onclick=stop;
+
+/* 3分割の枠を描く。座標は鏡像表示に合わせて反転して描画 */
+function drawOverlay(zone){
+  const v=$("video"), c=$("overlay"); if(!v.videoWidth) return;
+  c.width=v.clientWidth; c.height=v.clientHeight;
+  const g=c.getContext("2d"); g.clearRect(0,0,c.width,c.height);
+  g.strokeStyle="rgba(255,255,255,.5)"; g.lineWidth=2;
+  g.beginPath(); g.moveTo(c.width/3,0); g.lineTo(c.width/3,c.height);
+  g.moveTo(c.width*2/3,0); g.lineTo(c.width*2/3,c.height); g.stroke();
+  if(zone){ // 該当枠を強調（表示は鏡像なので左右入替）
+    let idx={L:0,C:1,R:2}[zone];
+    if($("tglFlip").checked) idx=2-idx;
+    g.fillStyle="rgba(26,77,143,.18)"; g.fillRect(c.width*idx/3,0,c.width/3,c.height);
+  }
+}
+
+/* 顔の向き：鼻(0)が両目(2,5)の中心よりどちらに寄るか。座標は人から見た左右に補正 */
+function faceDir(lm){
+  const nose=lm[0], le=lm[2], re=lm[5];
+  if(!nose||!le||!re) return null;
+  const midx=(le.x+re.x)/2, midy=(le.y+re.y)/2, span=Math.abs(le.x-re.x)+1e-6;
+  const rx=(nose.x-midx)/span;             // 左右：+で画面右
+  const ry=(nose.y-midy)/span;             // 上下：鼻が目より下(+)か上(-)か
+  const flip=$("tglFlip").checked;
+  // 上下を優先しすぎないよう、左右の傾きが小さいときだけ上下を見る
+  if(ry> 1.2) return "したむき";
+  if(ry< 0.15) return "うわむき";
+  if(rx> 0.15) return flip? "みぎむき":"ひだりむき";
+  if(rx< -0.15) return flip? "ひだりむき":"みぎむき";
+  return "まえむき";
+}
+function boneTest(){
+  try{ if(!actx) actx=new (window.AudioContext||window.webkitAudioContext)(); if(actx.state==="suspended") actx.resume(); }catch(e){ log("音声出力を開始できません"); return; }
+  const hz=+$("boneHz").value; let t=actx.currentTime+0.05;
+  // 低音で「トトトー」(S+dash) を1回、確認用に鳴らす
+  const seq=[0.2,0.2,0.2,0.6];
+  for(let i=0;i<seq.length;i++){
+    const o=actx.createOscillator(), g=actx.createGain();
+    o.type="sine"; o.frequency.value=hz; o.connect(g); g.connect(actx.destination);
+    g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.6,t+0.01);
+    g.gain.setValueAtTime(0.6,t+seq[i]-0.01); g.gain.linearRampToValueAtTime(0,t+seq[i]);
+    o.start(t); o.stop(t+seq[i]+0.01); t+=seq[i]+0.15;
+  }
+  try{ const u=new SpeechSynthesisUtterance("こつでんどう テストおん。きこえますか"); u.lang="ja-JP"; speechSynthesis.speak(u);}catch(e){}
+  log("骨伝導テスト音を鳴らしました（"+hz+"Hz）");
+}
+$("btnBoneTest").onclick=boneTest;
+$("btnFace").onclick=()=>{ if(lastLm){ const f=faceDir(lastLm); if(f){ sayFace("ひと "+f); $("dir").textContent="顔: "+f; } else sayFace("かおが みえません"); } else sayFace("ひとが みえません"); };
+
+function decide(lm){
+  // 体の中心x（肩の中点）を3分割で判定。人から見た左右に反転
+  const ls=lm[11], rs=lm[12]; if(!ls||!rs) return null;
+  const cx=(ls.x+rs.x)/2;                    // 0..1 カメラ座標
+  // カメラ座標の左(0)は、鏡像でない実空間では人の右。人から見た左右に合わせる：
+  let px=cx; if($("tglFlip").checked) px=1-px;   // 左右入れ替えトグル
+  let zone = px<1/3 ? "L" : (px<2/3 ? "C" : "R");
+  // 大きさの指標＝肩幅と目間距離のうち、信頼できるものを採用（大きいほど近い）
+  const shoulder=Math.abs(ls.x-rs.x);
+  const le=lm[2], re=lm[5];
+  const eye=(le&&re)?Math.abs(le.x-re.x):null;
+  // 肩幅と目間を正規化して合成（目間は肩幅の約1/3なので3倍して尺度を合わせる）
+  const size = eye!=null ? Math.max(shoulder, eye*3) : shoulder;
+  if(baseSize===null) baseSize=size;
+  const ratio=size/baseSize*100;
+  const near=ratio >= +$("nearTh").value;
+  // 直前の大きさと比較して「増加中＝接近」「ほぼ一定＝静止」
+  let approaching=false;
+  if(prevSize!==null){
+    const dz=(size-prevSize)/(prevSize+1e-6);
+    approaching = dz > 0.03;
+  }
+  prevSize=size;
+  return {zone,near,ratio,approaching};
+}
+let prevSize=null, baseSize=null;
+
+const KANA={L:"ひだり",C:"まえ",R:"みぎ"}, LET={L:"S",C:"K",R:"M"};
+async function fire(zone,near,approaching){
+  const fast = near || approaching;                      // 接近中は2倍速
+  const now=performance.now(), key=zone+(fast?"F":"S"), rep=(+$("repeatSec").value)*1000;
+  if(key!==lastKey || now-lastSent>=rep){
+    lastKey=key; lastSent=now;
+    await pico("/z?d="+zone+(fast?"&fast=1":""));         // 通電
+    morseTone(LET[zone], fast?2:1);                       // 骨伝導 低音モールス
+    say(KANA[zone]+" "+(fast?"せっきん":"せいし"));       // 音声：接近 or 静止中
+    log("送信 "+KANA[zone]+(fast?" 接近(2倍速)":" 静止"));
+  }
+}
+async function loop(){
+  if(!running) return;
+  const v=$("video");
+  if(v.readyState>=2 && landmarker){
+    const res=landmarker.detectForVideo(v, performance.now());
+    if(res.landmarks && res.landmarks.length){
+      lastLm=res.landmarks[0];
+      const d=decide(lastLm);
+      if(d){
+        $("dir").textContent=KANA[d.zone]+" "+LET[d.zone]+(d.near?"  ←接近":"");
+        $("status").textContent="検出中  肩幅比 "+Math.round(d.ratio)+"%";
+        drawOverlay(d.zone); fire(d.zone,d.near,d.approaching);
+      }
+    }else{ lastLm=null; prevSize=null; baseSize=null; $("dir").textContent=""; $("status").textContent="人を探しています…"; lastKey=null; drawOverlay(null); }
+  }
+  raf=requestAnimationFrame(loop);
+}
+
+if("serviceWorker" in navigator){
+  navigator.serviceWorker.register("okimo_sw.js").then(()=>log("SW登録")).catch(e=>log("SW失敗:"+e.message));
+}
+</script>
+</body></html>
